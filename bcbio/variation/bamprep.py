@@ -36,13 +36,12 @@ def _gatk_extract_reads_cl(data, region, prep_params, tmp_dir):
             args += ["-BQSR", data["prep_recal"]]
     elif prep_params["recal"]:
         raise NotImplementedError("Recalibration method %s" % prep_params["recal"])
-    memscale = {"direction": "decrease", "magnitude": 3}
     if requires_gatkfull:
         runner = broad.runner_from_config(data["config"])
-        return runner.cl_gatk(args, tmp_dir, memscale=memscale)
+        return runner.cl_gatk(args, tmp_dir)
     else:
-        jvm_opts = broad.get_gatk_framework_opts(data["config"], memscale=memscale)
-        return [config_utils.get_program("gatk-framework", data["config"])] + jvm_opts + args
+        jvm_opts = broad.get_gatk_framework_opts(data["config"])
+        return broad.gatk_cmd("gatk-framework", jvm_opts, prep_params)
 
 def _recal_has_reads(in_file):
     with open(in_file) as in_handle:
@@ -51,9 +50,7 @@ def _recal_has_reads(in_file):
 def _piped_input_cl(data, region, tmp_dir, out_base_file, prep_params):
     """Retrieve the commandline for streaming input into preparation step.
     """
-    cl = _gatk_extract_reads_cl(data, region, prep_params, tmp_dir)
-    sel_file = data["work_bam"]
-    return sel_file, " ".join(cl)
+    return data["work_bam"], _gatk_extract_reads_cl(data, region, prep_params, tmp_dir)
 
 def _piped_realign_gatk(data, region, cl, out_base_file, tmp_dir, prep_params):
     """Perform realignment with GATK, using input commandline.
@@ -72,7 +69,7 @@ def _piped_realign_gatk(data, region, cl, out_base_file, tmp_dir, prep_params):
     recal_cl = realign.gatk_indel_realignment_cl(broad_runner, pa_bam, data["sam_ref"],
                                                  recal_file, tmp_dir, region=region_to_gatk(region),
                                                  known_vrns=dd.get_variation_resources(data))
-    return pa_bam, " ".join(recal_cl)
+    return pa_bam, recal_cl
 
 def _cleanup_tempfiles(data, tmp_files):
     for tmp_file in tmp_files:
@@ -107,10 +104,9 @@ def _piped_bamprep_region_gatk(data, region, prep_params, out_file, tmp_dir):
 def _get_prep_params(data):
     """Retrieve configuration parameters with defaults for preparing BAM files.
     """
-    algorithm = data["config"]["algorithm"]
-    recal_param = algorithm.get("recalibrate", True)
+    recal_param = dd.get_recalibrate(data)
     recal_param = "gatk" if recal_param is True else recal_param
-    realign_param = algorithm.get("realign", True)
+    realign_param = dd.get_realign(data)
     realign_param = "gatk" if realign_param is True else realign_param
     return {"recal": recal_param, "realign": realign_param}
 

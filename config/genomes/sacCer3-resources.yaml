@@ -1,8 +1,8 @@
-version: 6
+version: 8
 
 aliases:
-  ensembl: saccharomyces_cerevisiae_vep_81_R64-1-1
-  snpeff: EF4.74
+  ensembl: saccharomyces_cerevisiae_vep_83_R64-1-1
+  snpeff: R64-1-1.82
 rnaseq:
   transcripts: ../rnaseq/ref-transcripts.gtf
   transcripts_mask: ../rnaseq/ref-transcripts-mask.gtf

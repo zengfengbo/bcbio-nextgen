@@ -1,10 +1,36 @@
 import os
+import sys
 from bcbio.rnaseq import (featureCounts, cufflinks, oncofuse, count, dexseq,
                           express, variation, stringtie, sailfish)
 from bcbio.ngsalign import bowtie2, alignprep
+from bcbio.variation import vardict
 import bcbio.pipeline.datadict as dd
-from bcbio.utils import filter_missing
+from bcbio.utils import filter_missing, flatten
 from bcbio.log import logger
+
+def fast_rnaseq(samples, run_parallel):
+#    samples = run_parallel("run_rapmap_pseudoalign", samples)
+    samples = run_parallel("run_salmon_reads", samples)
+    samples = sailfish.combine_sailfish(samples)
+#    samples = run_parallel("run_salmon_bam", samples)
+    return samples
+
+def singlecell_rnaseq(samples, run_parallel):
+    quantifier = dd.get_in_samples(samples, dd.get_singlecell_quantifier)
+    quantifier = quantifier.lower()
+    samples = run_parallel("run_umi_transform", samples)
+    samples = run_parallel("run_barcode_histogram", samples)
+    samples = run_parallel("run_filter_barcodes", samples)
+    if quantifier == "rapmap":
+        samples = run_parallel("run_rapmap_align", samples)
+        samples = run_parallel("run_tagcount", samples)
+    elif quantifier == "kallisto":
+        samples = run_parallel("run_kallisto_singlecell", samples)
+    else:
+        logger.error(("%s is not supported for singlecell RNA-seq "
+                      "quantification." % quantifier))
+        sys.exit(1)
+    return samples
 
 def rnaseq_variant_calling(samples, run_parallel):
     """
@@ -16,13 +42,26 @@ def rnaseq_variant_calling(samples, run_parallel):
 
 def run_rnaseq_variant_calling(data):
     variantcaller = dd.get_variantcaller(data)
+    if isinstance(variantcaller, list) and len(variantcaller) > 1:
+        logger.error("Only one variantcaller can be run for RNA-seq at "
+                     "this time. Post an issue here "
+                     "(https://github.com/chapmanb/bcbio-nextgen/issues) "
+                     "if this is something you need to do.")
+        sys.exit(1)
+
     if variantcaller and "gatk" in variantcaller:
         data = variation.rnaseq_gatk_variant_calling(data)
+    if vardict.get_vardict_command(data):
+        data = variation.rnaseq_vardict_variant_calling(data)
     return [[data]]
 
 def run_rnaseq_joint_genotyping(*samples):
     data = samples[0][0]
     variantcaller = dd.get_variantcaller(data)
+    if not variantcaller:
+       return samples
+    if "gatk" not in variantcaller:
+        return samples
     ref_file = dd.get_ref_file(data)
     out_file = os.path.join(dd.get_work_dir(data, "."), "variation", "combined.vcf")
     if variantcaller and "gatk" in variantcaller:
@@ -40,13 +79,14 @@ def quantitate_expression_parallel(samples, run_parallel):
     quantitate expression, all programs run here should be multithreaded to
     take advantage of the threaded run_parallel environment
     """
-    samples = run_parallel("generate_transcript_counts", samples)
-    samples = run_parallel("run_cufflinks", samples)
     data = samples[0][0]
-    if "sailfish" in dd.get_expression_caller(data):
-        samples = run_parallel("run_sailfish", samples)
-        samples = sailfish.combine_sailfish(samples)
-    #samples = run_parallel("run_stringtie_expression", samples)
+    samples = run_parallel("generate_transcript_counts", samples)
+    samples = run_parallel("run_sailfish", samples)
+    samples = sailfish.combine_sailfish(samples)
+    if "cufflinks" in dd.get_expression_caller(data):
+        samples = run_parallel("run_cufflinks", samples)
+    if "stringtie" in dd.get_expression_caller(data):
+        samples = run_parallel("run_stringtie_expression", samples)
     return samples
 
 def quantitate_expression_noparallel(samples, run_parallel):
@@ -54,7 +94,8 @@ def quantitate_expression_noparallel(samples, run_parallel):
     run transcript quantitation for algorithms that don't run in parallel
     """
     data = samples[0][0]
-    samples = run_parallel("run_express", samples)
+    if "express" in dd.get_expression_caller(data):
+        samples = run_parallel("run_express", samples)
     samples = run_parallel("run_dexseq", samples)
     return samples
 
@@ -67,24 +108,27 @@ def generate_transcript_counts(data):
         if oncofuse_file:
             data = dd.set_oncofuse_file(data, oncofuse_file)
 
-    if dd.get_transcriptome_align(data) and not dd.get_transcriptome_bam(data):
-        file1, file2 = None, None
-
+    if dd.get_transcriptome_align(data):
+        # to create a disambiguated transcriptome file realign with bowtie2
         if dd.get_disambiguate(data):
+            logger.info("Aligning to the transcriptome with bowtie2 using the "
+                        "disambiguated reads.")
             bam_path = data["work_bam"]
             fastq_paths = alignprep._bgzip_from_bam(bam_path, data["dirs"], data["config"], is_retry=False, output_infix='-transcriptome')
             if len(fastq_paths) == 2:
                 file1, file2 = fastq_paths
             else:
                 file1, file2 = fastq_paths[0], None
+            ref_file = dd.get_ref_file(data)
+            data = bowtie2.align_transcriptome(file1, file2, ref_file, data)
         else:
             file1, file2 = dd.get_input_sequence_files(data)
-
-        ref_file = dd.get_ref_file(data)
-        logger.info("Transcriptome alignment was flagged to run, but the "
-                    "transcriptome BAM file was not found. Aligning to the "
-                    "transcriptome with bowtie2.")
-        data = bowtie2.align_transcriptome(file1, file2, ref_file, data)
+        if not dd.get_transcriptome_bam(data):
+            ref_file = dd.get_ref_file(data)
+            logger.info("Transcriptome alignment was flagged to run, but the "
+                        "transcriptome BAM file was not found. Aligning to the "
+                        "transcriptome with bowtie2.")
+            data = bowtie2.align_transcriptome(file1, file2, ref_file, data)
     return [[data]]
 
 def run_stringtie_expression(data):
@@ -143,22 +187,35 @@ def cufflinks_assemble(data):
     out_dir = os.path.join(dd.get_work_dir(data), "assembly")
     num_cores = dd.get_num_cores(data)
     assembled_gtf = cufflinks.assemble(bam_file, ref_file, num_cores, out_dir, data)
-    data = dd.set_assembled_gtf(data, assembled_gtf)
+    dd.get_assembled_gtf(data).append(assembled_gtf)
     return [[data]]
 
 def cufflinks_merge(*samples):
-    to_merge = filter_missing([dd.get_assembled_gtf(data) for data in
-                            dd.sample_data_iterator(samples)])
+    to_merge = filter_missing(flatten([dd.get_assembled_gtf(data) for data in
+                                       dd.sample_data_iterator(samples)]))
     data = samples[0][0]
-    bam_file = dd.get_work_bam(data)
     ref_file = dd.get_sam_ref(data)
     gtf_file = dd.get_gtf_file(data)
-    out_dir = os.path.join(dd.get_work_dir(data), "assembly")
     num_cores = dd.get_num_cores(data)
-    merged_gtf = cufflinks.merge(to_merge, ref_file, gtf_file, num_cores, samples[0][0])
+    merged_gtf = cufflinks.merge(to_merge, ref_file, gtf_file, num_cores,
+                                 samples[0][0])
     updated_samples = []
     for data in dd.sample_data_iterator(samples):
-        data = dd.set_assembled_gtf(data, merged_gtf)
+        data = dd.set_merged_gtf(data, merged_gtf)
+        updated_samples.append([data])
+    return updated_samples
+
+def stringtie_merge(*samples):
+    to_merge = filter_missing(flatten([dd.get_assembled_gtf(data) for data in
+                                       dd.sample_data_iterator(samples)]))
+    data = samples[0][0]
+    ref_file = dd.get_sam_ref(data)
+    gtf_file = dd.get_gtf_file(data)
+    num_cores = dd.get_num_cores(data)
+    merged_gtf = stringtie.merge(to_merge, ref_file, gtf_file, num_cores, data)
+    updated_samples = []
+    for data in dd.sample_data_iterator(samples):
+        data = dd.set_merged_gtf(data, merged_gtf)
         updated_samples.append([data])
     return updated_samples
 
@@ -170,9 +227,17 @@ def assemble_transcripts(run_parallel, samples):
     run Cufflinks in without a reference GTF for each individual sample
     merge the assemblies with Cuffmerge using a reference GTF
     """
-    if dd.get_assemble_transcripts(samples[0][0]):
-        samples = run_parallel("cufflinks_assemble", samples)
-        samples = run_parallel("cufflinks_merge", [samples])
+    assembler = dd.get_in_samples(samples, dd.get_transcript_assembler)
+    data = samples[0][0]
+    if assembler:
+        if "cufflinks" in assembler:
+            samples = run_parallel("cufflinks_assemble", samples)
+        if "stringtie" in assembler:
+            samples = run_parallel("run_stringtie_expression", samples)
+        if "stringtie" in assembler and stringtie.supports_merge(data):
+            samples = run_parallel("stringtie_merge", [samples])
+        else:
+            samples = run_parallel("cufflinks_merge", [samples])
     return samples
 
 def combine_files(samples):

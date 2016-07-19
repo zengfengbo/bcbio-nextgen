@@ -126,14 +126,13 @@ def _bcbio_variation_ensemble(vrn_files, out_file, ref_file, config_file, base_d
     """
     vrn_files = [_handle_somatic_ensemble(v, data) for v in vrn_files]
     tmp_dir = utils.safe_makedir(os.path.join(base_dir, "tmp"))
-    bv_jar = config_utils.get_jar("bcbio.variation",
-                                  config_utils.get_program("bcbio_variation", data["config"], "dir"))
     resources = config_utils.get_resources("bcbio_variation", data["config"])
     jvm_opts = resources.get("jvm_opts", ["-Xms750m", "-Xmx2g"])
     java_args = ["-Djava.io.tmpdir=%s" % tmp_dir]
-    cmd = ["java"] + jvm_opts + java_args + ["-jar", bv_jar, "variant-ensemble", config_file,
-                                             ref_file, out_file] + vrn_files
+    cmd = ["bcbio-variation"] + jvm_opts + java_args + \
+          ["variant-ensemble", config_file, ref_file, out_file] + vrn_files
     with utils.chdir(base_dir):
+        cmd = "%s %s" % (utils.local_path_export(), " ".join(str(x) for x in cmd))
         do.run(cmd, "Ensemble calling: %s" % os.path.basename(base_dir))
 
 def _run_ensemble(batch_id, vrn_files, config_file, base_dir, ref_file, data):
@@ -165,7 +164,7 @@ def _write_config_file(batch_id, caller_names, base_dir, data):
     econfig = {"ensemble": algorithm["ensemble"],
                "names": caller_names,
                "prep-inputs": False}
-    intervals = validate.get_analysis_intervals(data)
+    intervals = validate.get_analysis_intervals(data, None, base_dir)
     if intervals:
         econfig["intervals"] = os.path.abspath(intervals)
     with open(config_file, "w") as out_handle:
@@ -192,9 +191,11 @@ def _run_ensemble_intersection(batch_id, vrn_files, callers, base_dir, edata):
         cmd = [config_utils.get_program("bcbio-variation-recall", edata["config"]),
                "ensemble", "--cores=%s" % edata["config"]["algorithm"].get("num_cores", 1),
                "--numpass", str(num_pass), "--names", ",".join(callers)]
-        # Remove filtered calls, do not try to rescue
-        cmd += ["--nofiltered"]
+        # Remove filtered calls, do not try to rescue, unless configured
+        if not tz.get_in(["config", "algorithm", "ensemble", "use_filtered"], edata):
+            cmd += ["--nofiltered"]
         cmd += [out_vcf_file, dd.get_ref_file(edata)] + vrn_files
+        cmd = "%s %s" % (utils.local_path_export(), " ".join(str(x) for x in cmd))
         do.run(cmd, "Ensemble intersection calling: %s" % (batch_id))
     in_data = utils.deepish_copy(edata)
     in_data["vrn_file"] = out_vcf_file

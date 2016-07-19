@@ -6,16 +6,16 @@ Configuration
 Two configuration files, in easy to write `YAML format`_, specify
 details about your system and samples to run:
 
-- ``bcbio_system.yaml`` High level information about the system,
-  including locations of installed programs like Picard and GATK.
-  These apply across multiple runs. The automated installer creates
-  a ready to go system configuration file that can be manually
-  edited to match the system. Find the file in the galaxy sub-directory
-  within your installation data location
-  (ie. ``/usr/local/share/bcbio-nextgen/galaxy``). By default, the
-  pipeline uses the standard pre-created configuration file but
-  multiple system configurations can be independently maintained
-  and passed as the first argument to ``bcbio_nextgen.py`` commands.
+- ``bcbio_system.yaml`` High level information about the system, including
+  locations of installed programs like GATK and cores and memory usage (see
+  :ref:`tuning-cores`). These apply across multiple runs. The automated
+  installer creates a ready to go system configuration file that can be manually
+  edited to match the system. Find the file in the galaxy sub-directory within
+  your installation data location (ie.
+  ``/usr/local/share/bcbio-nextgen/galaxy``). By default, the pipeline uses the
+  standard pre-created configuration file but multiple system configurations can
+  be independently maintained and passed as the first argument to
+  ``bcbio_nextgen.py`` commands.
 
 - ``bcbio_sample.yaml`` Details about a set of samples to process,
   including input files and analysis options. You configure these for
@@ -54,7 +54,7 @@ multiple samples using the template workflow command::
   template command tries to identify the ``samplename`` from read group
   information in a BAM file, or uses the base filename if no read group
   information is present. For BAM files, this would be the filename without the
-  extension and path (``/path/to/yourfile.bam => yourfile``). For fastq
+  extension and path (``/path/to/yourfile.bam => yourfile``). For FASTQ
   files, the template functionality will identify pairs using standard
   conventions (``_1`` and ``_2``, including Illumina extensions like ``_R1``),
   so use the base filename without these (``/path/to/yourfile_R1.fastq => yourfile``).
@@ -92,8 +92,8 @@ multiple samples using the template workflow command::
   ``project1`` directory containing the sample configuration in
   ``project1/config/project1.yaml``.
 
-- The remaining arguments are input BAM or fastq files. The script
-  pairs fastq files (identified by ``_1`` and ``_2``) and extracts
+- The remaining arguments are input BAM or FASTQ files. The script
+  pairs FASTQ files (identified by ``_1`` and ``_2``) and extracts
   sample names from input BAMs, populating the ``files`` and
   ``description`` field in the final configuration file. Specify the
   full path to sample files on your current machine.
@@ -113,7 +113,7 @@ samples, pointing to this custom configuration file::
 
     bcbio_nextgen -w template project1/config/project1-template.yaml project1.csv folder/*
 
-If your sample folder contains additional BAM or fastq files you do not wish to
+If your sample folder contains additional BAM or FASTQ files you do not wish to
 include in the sample YAML configuration, you can restrict the output to only
 include samples in the metadata CSV with ``--only-metadata``. The output will
 print warnings about samples not present in the metadata file, then leave these
@@ -123,6 +123,7 @@ out of the final output YAML::
 
 
 .. _best-practice templates: https://github.com/chapmanb/bcbio-nextgen/tree/master/config/templates
+
 .. _multi-files-sample-configuration:
 
 Multiple files per sample
@@ -136,7 +137,7 @@ The main parameters are:
 
 
         samplename,description,batch,phenotype,sex,variant_regions
-        file1.fastq,sample1,batch1,normal,female,,/path/to/regions.bed
+        file1.fastq,sample1,batch1,normal,female,/path/to/regions.bed
         file2.fastq,sample1,batch1,normal,female,/path/to/regions.bed
         file1.fastq,sample2,batch1,tumor,,/path/to/regions.bed
 
@@ -166,8 +167,6 @@ See more examples at `parallelize pipeline`_.
 
 .. _parallelize pipeline: https://bcbio-nextgen.readthedocs.org/en/latest/contents/parallel.html
 
-.. _sample-configuration:
-
 In case of paired reads, the CSV file should contain all files::
 
         samplename,description,batch,phenotype,sex,variant_regions
@@ -184,6 +183,8 @@ The output CSV will look like and is compatible with bcbio::
         samplename,description,batch,phenotype,sex,variant_regions
         sample1,sample1,batch1,normal,female,/path/to/regions.bed
 
+
+.. _sample-configuration:
 
 Sample information
 ~~~~~~~~~~~~~~~~~~
@@ -214,7 +215,7 @@ The sample configuration file defines ``details`` of each sample to process::
   ``SM`` parameter in the BAM read group. Required.
 
 - ``files`` A list of files to process. This currently supports either a single
-  end or two paired end fastq files, or a single BAM file. It does not yet
+  end or two paired-end FASTQ files, or a single BAM file. It does not yet
   handle merging BAM files or more complicated inputs.
 
 - ``genome_build`` Genome build to align to, which references a genome
@@ -249,7 +250,13 @@ The sample configuration file defines ``details`` of each sample to process::
    - ``platform_unit`` -- Unique identifier for sample. Optional, defaults to
      ``lane`` if not specified.
 
-   - ``library`` -- Name of library preparation used. Optional, empty if not present.
+   - ``library`` -- Name of library preparation used. Optional, empty if not
+     present.
+
+   - ``validate_batch`` -- Specify a batch name to group samples together for
+     preparing validation plots. This is useful if you want to process samples
+     in specific batches, but include multiple batches into the same
+     validation plot.
 
 .. _upload-configuration:
 
@@ -358,9 +365,14 @@ Alignment
    problematic input BAMs.
 -  ``bam_clean`` Clean an input BAM when skipping alignment step. This
    handles adding read groups, sorting to a reference genome and
-   filtering problem records that cause problems with GATK. Set to
-   ``picard`` to do Picard/GATK based cleaning. To fix misencoded input BAMs
-   with non-standard scores, set ``quality_format`` to ``illumina``.
+   filtering problem records that cause problems with GATK. Options:
+
+     - ``fixrg`` -- only adjust read groups, assuming everything else in BAM
+       file is compatible.
+     - ``picard`` -- Picard/GATK based cleaning. Includes read group changes,
+       fixing of problematic reads and re-ordering chromosome order to match the
+       reference genome. To fix misencoded input BAMs with non-standard scores,
+       set ``quality_format`` to ``illumina``.
 -  ``bam_sort`` Allow sorting of input BAMs when skipping alignment
    step (``aligner`` set to false). Options are coordinate or
    queryname. For additional processing through standard pipelines
@@ -371,11 +383,13 @@ Alignment
   supports cleaning a single organism. For example, with ``genome_build: hg19``
   and ``disambiguate: [mm10]``, it will align to hg19 and mm10, run
   disambiguation and continue with reads confidently aligned to hg19. Affects
-  fusion detection when ``star`` is chosen as the aligner.
+  fusion detection when ``star`` is chosen as the aligner. Aligner must be
+  set to a non false value for this to run.
 - ``trim_reads`` Can be set to trim low quality ends or to also trim off,
   in conjunction with the ``adapters`` field a set of adapter sequences or
   poly-A tails that could appear on the ends of reads. Only used in RNA-seq
-  pipelines, not variant calling. [False, read_through]
+  pipelines, not variant calling. [False, read_through]. Default to False,
+  recommended to leave as False unless running Tophat2.
 - ``min_read_length`` Minimum read length to maintain when
   ``read_through`` trimming set in ``trim_reads``. Defaults to 20.
 -  ``adapters`` If trimming adapter read through, trim a set of stock
@@ -384,31 +398,26 @@ Alignment
    and polyA tails. Valid items are [truseq, illumina, nextera, polya]
 -  ``custom_trim`` A list of sequences to trim from the end of reads,
    for example: [AAAATTTT, GGGGCCCC]
-- ``align_split_size``: Increase parallelization of alignment. This defines the
-  number of records to feed into each independent parallel step (for example,
-  5000000 = 5 million reads per chunk). It converts the original inputs into
-  bgzip grabix indexed FASTQ files, and then retrieves chunks for parallel
-  alignment. Following alignment, it combines all chunks back into the final
-  merged alignment file. This allows parallelization at the cost of additional
-  work of preparing inputs and combining split outputs. The tradeoff makes
-  sense when you have large files and lots of distributed compute. When you
-  have fewer large multicore machines this parameter may not help speed up
-  processing.
--  ``quality_bin``: Perform binning of quality scores with CRAM to
-   reduce file sizes. Uses the Illumina 8-bin approach. Supply a list
-   of times to perform binning: [prealignment, postrecal]
--  ``quality_format`` Quality format of fastq or BAM inputs [standard, illumina]
--  ``merge_bamprep`` Merge regional BAM prepped files into a final
-   prepared BAM. false avoids the time consuming merge when you only
-   want variant calls [true, false]
+- ``align_split_size``: Increase parallelization of alignment. As of 0.9.8,
+  bcbio will try to determine a useful parameter and you don't need to set this.
+  If you manually set it, bcbio will respect your specification. Set to false
+  to avoid splitting entirely. If set, this defines the number of records to
+  feed into each independent parallel step (for example, 5000000 = 5 million
+  reads per chunk). It converts the original inputs into bgzip grabix indexed
+  FASTQ files, and then retrieves chunks for parallel alignment. Following
+  alignment, it combines all chunks back into the final merged alignment file.
+  This allows parallelization at the cost of additional work of preparing inputs
+  and combining split outputs. The tradeoff makes sense when you have large
+  files and lots of distributed compute. When you have fewer large multicore
+  machines this parameter may not help speed up processing.
+-  ``quality_format`` Quality format of FASTQ or BAM inputs [standard, illumina]
 -  ``strandedness`` For RNA-seq libraries, if your library is strand
-   specific, set the appropriate flag form [unstranded, firststrand, secondstrand].
+   specific, set the appropriate flag from [unstranded, firststrand, secondstrand].
    Defaults to unstranded. For dUTP marked libraries, firststrand is correct; for
    Scriptseq prepared libraries, secondstrand is correct.
 
-Experimental information
-========================
-
+Coverage information
+====================
 - ``coverage_interval`` Regions covered by sequencing. bcbio calculates this
   automatically from alignment coverage information, so you only need to
   specify it in the input configuration if you have specific needs or bcbio
@@ -424,14 +433,17 @@ Experimental information
 -  ``coverage_depth_min`` Minimum depth of coverage. Regions with less reads
    will not get called. Defaults to 4. Setting lower than 4 will trigger
    low-depth calling options for GATK.
--  ``ploidy`` Ploidy of called reads. Defaults to 2 (diploid).
 - ``coverage`` A BED file of regions to check for coverage. Coverage
   and completeness are calculated over these regions and a Rmarkdown
-  report is generated in the `report` directory.
-- ``expression_caller`` A list of optional, experimental callers to turn on.
-  Supports ['sailfish'].
+  report is generated in the `report` directory. See the section on
+  :ref:`input-file-preparation` for tips on ensuring this file matches
+  your reference genome. This can also be a shorthand for a BED file installed
+  by bcbio (see :ref:`sv-config` for options).
 
-.. _Chanjo: http://www.chanjo.co/en/latest/
+Experimental information
+========================
+
+-  ``ploidy`` Ploidy of called reads. Defaults to 2 (diploid).
 
 .. _variant-config:
 
@@ -440,24 +452,48 @@ Variant calling
 
 -  ``variantcaller`` Variant calling algorithm. Can be a list of
    multiple options or false to skip [gatk, freebayes, gatk-haplotype, platypus,
-   mutect, scalpel, vardict, varscan, samtools, false]
+   mutect, mutect2, scalpel, vardict, varscan, samtools, false]
 
     - Paired (typically somatic, tumor-normal) variant calling is currently
-      supported by freebayes, varscan, mutect (see disclaimer below),
-      scalpel (indels only) and vardict. See ``phenotype`` below for how to pair tumor
+      supported by vardict, freebayes, mutect2, mutect (see disclaimer below),
+      scalpel (indels only) and varscan. See ``phenotype`` below for how to pair tumor
       and normal samples.
     - Selecting mutect (SNP caller) can also be combined by indels from scalpel or sid and
       combine the output. Mutect operates in both tumor-normal and tumor-only modes.
       In tumor-only mode the indels from scalpel will reflect all indels in the sample,
       as there is currently no way of separating the germline from somatic indels in
       tumor-only mode.
--  ``indelcaller`` For SNP only variant callers it is possible to combine the calling
-   with indelcallers such as scalpel, pindel and somatic indel detector (for Appistry MuTect
-   users only). Currently an experimental option that adds these indel calls to
-   MuTect's SNP-only output. Omit to ignore. [scalpel, pindel, sid, false]
+-  ``variant_regions`` BED file of regions to call variants in. See the section on
+   :ref:`input-file-preparation` for tips on ensuring this file matches
+   your reference genome.
+-  ``mark_duplicates`` Identify and remove variants [true, false]
+   If true, will perform streaming duplicate marking with `samblaster`_ for
+   paired reads and `biobambam's bammarkduplicates`_ for single end reads.
+-  ``recalibrate`` Perform base quality score recalibration on the
+   aligned BAM file. Defaults to false, no recalibration. [false, gatk]
+-  ``realign`` Perform realignment around indels on the aligned BAM
+   file. Defaults to no realignment since realigning callers like FreeBayes and
+   GATK HaplotypeCaller handle this as part of the calling process. [false, gatk]
+- ``effects`` Method used to calculate expected variant effects. Defaults to
+  `snpEff`_ and `Ensembl variant effect predictor (VEP)`_ is also available
+  with support for `dbNSFP`_ annotation, when downloaded using
+  :ref:`datatarget-install`. [snpeff, vep, false]
+-  ``remove_lcr`` Remove variants in low complexity regions (LCRs)
+   for human variant calling. `Heng Li's variant artifacts paper`_ provides
+   these regions, which cover ~2% of the genome but contribute to a large
+   fraction of problematic calls due to the difficulty of resolving variants
+   in repetitive regions. Removal can help facilitate comparisons between
+   methods and reduce false positives if you don't need calls in LCRs for your
+   biological analysis. [false, true]
+- ``indelcaller`` For the MuTect SNP only variant caller it is possible to add
+   calls from an indelcaller such as scalpel, pindel and somatic indel detector
+   (for Appistry MuTect users only). Currently an experimental option that adds
+   these indel calls to MuTect's SNP-only output. Only one caller supported.
+   Omit to ignore. [scalpel, pindel, sid, false]
 -  ``jointcaller`` Joint calling algorithm, combining variants called with the
    specified ``variantcaller``. Can be a list of multiple options but needs to
-   match with appropriate ``variantcaller``
+   match with appropriate ``variantcaller``. Joint calling is only needed for
+   larger input sample sizes (>100 samples), otherwise use standard pooled :ref:`population-calling`:
 
      - ``gatk-haplotype-joint`` `GATK incremental joint discovery
        <http://www.broadinstitute.org/gatk/guide/article?id=3893>`_ with
@@ -473,34 +509,14 @@ Variant calling
      - ``samtools-joint`` Combine platypus calls using bcbio.variation.recall
        with squaring off at all positions found in each individual
        sample. Requires ``samtools`` variant calling.
--  ``variant_regions`` BED file of regions to call variants in.
--  ``mark_duplicates`` Identify and remove variants [true, false]
-   If true, will perform streaming duplicate marking with `samblaster`_ for
-   paired reads and `biobambam's bammarkduplicates`_ for single end reads.
--  ``recalibrate`` Perform base quality score recalibration on the
-   aligned BAM file. Defaults to gatk. [false, gatk]
--  ``realign`` Perform realignment around indels on the aligned BAM
-   file. Defaults to no realignment since realigning callers like FreeBayes and
-   GATK HaplotypeCaller handle this as part of the calling process. [false, gatk]
-- ``effects`` Method used to calculate expected variant effects. Defaults to
-  `snpEff`_ and `Ensembl variant effect predictor (VEP)`_ is also available
-  with support for `dbNSFP`_ annotation, when downloaded using
-  :ref:`toolplus-install`. [snpeff, vep, false]
--  ``phasing`` Do post-call haplotype phasing of variants. Defaults to
-   no phasing [false, gatk]
--  ``remove_lcr`` Remove variants in low complexity regions (LCRs)
-   for human variant calling. `Heng Li's variant artifacts paper`_ provides
-   these regions, which cover ~2% of the genome but contribute to a large
-   fraction of problematic calls due to the difficulty of resolving variants
-   in repetitive regions. Removal can help facilitate comparisons between
-   methods and reduce false positives if you don't need calls in LCRs for your
-   biological analysis. [false, true]
 - ``joint_group_size`` Specify the maximum number of gVCF samples to feed into
   joint calling. Currently applies to GATK HaplotypeCaller joint calling and
   defaults to the GATK recommendation of 200. Larger numbers of samples will
   first get combined prior to genotyping.
+-  ``phasing`` Do post-call haplotype phasing of variants. Defaults to
+   no phasing [false, gatk]
 - ``clinical_reporting`` Tune output for clinical reporting.
-  Modifies snpEff parameters to use HGVS notational on canonical
+  Modifies snpEff parameters to use HGVS notation on canonical
   transcripts [false, true].
 - ``background`` Provide a VCF file with variants to use as a background
   reference during variant calling. For tumor/normal paired calling use this to
@@ -513,15 +529,34 @@ Variant calling
 .. _biobambam's bammarkduplicates: https://github.com/gt1/biobambam
 .. _Heng Li's variant artifacts paper: http://arxiv.org/abs/1404.0929
 
+.. _sv-config:
+
 Structural variant calling
 ==========================
 
 - ``svcaller`` -- List of structural variant callers to use. [lumpy, manta,
-  cnvkit]. LUMPY, Manta and DELLY require paired end reads.
+  cnvkit, seq2c, battenberg]. LUMPY, Manta and DELLY require paired end reads.
+- ``svprioritize`` --  Produce a tab separated summary file of structural
+  variants in regions of interest. This complements the full VCF files of
+  structural variant calls to highlight changes in known genes. This can be
+  either the path to a BED file (with ``chrom start end gene_name``, see
+  :ref:`input-file-preparation`) or the name
+  of one of the pre-installed prioritization files:
+
+     - ``cancer/civic`` (hg19, GRCh37, hg38) -- Known cancer associated genes from
+       `CIViC <https://civic.genome.wustl.edu>`_.
+     - ``cancer/az300`` (hg19, GRCh37, hg38) -- 300 cancer associated genes
+       contributed by `AstraZeneca oncology
+     - ``cancer/az-cancer-panel`` (hg19, GRCh37, hg38) -- A text file of genes in the
+       AstraZeneca cancer panel. This is only usable for ``svprioritize`` which
+       can take a list of gene names instead of a BED file.
+       <https://www.astrazeneca.com/our-focus-areas/oncology.html>`_.
+     - ``actionable/ACMG56`` -- Medically actionable genes from the `The American College
+       of Medical Genetics and Genomics <http://iobio.io/2016/03/29/acmg56/>`_
 - ``sv_regions`` -- A specification of regions to target during structural
   variant calling. By default, bcbio uses regions specified in
   ``variant_regions`` but this allows custom specification for structural
-  variant calling. This can be a pointer to a bed file or special inputs:
+  variant calling. This can be a pointer to a BED file or special inputs:
   ``exons`` for only exon regions, ``transcripts`` for transcript regions (the
   min start and max end of exons) or ``transcriptsXXXX`` for transcripts plus a
   window of XXXX size around it. The size can be an integer (``transcripts1000``)
@@ -531,6 +566,14 @@ Structural variant calling
   or Tophat (not recommended) as the aligner. OncoFuse is used to summarise the fusions
   but currently only supports ``hg19`` and ``GRCh37``. For explant samples
   ``disambiguate`` enables disambiguation of ``STAR`` output [false, true].
+
+HLA typing
+==========
+- ``hlacaller`` -- Perform identification of highly polymorphic HLAs with human
+  build 38 (hg38). The recommended options is ``optitype``, using the `OptiType
+  <https://github.com/FRED-2/OptiType>`_ caller. Also supports using the `bwa
+  HLA typing implementation
+  <https://github.com/lh3/bwa/blob/master/README-alt.md#hla-typing>`_ with ``bwakit``
 
 Validation
 ===========
@@ -580,10 +623,14 @@ and for cancer validations:
 
 - ``dream-syn3`` -- Synthetic dataset 3 from the `ICGC-TCGA DREAM mutation
   calling challenge <https://www.synapse.org/#!Synapse:syn312572/wiki/62018>`_.
-  Truth sets: small_variants, regions, DEL, DUP, INV. Builds: GRCh37.
+  Truth sets: small_variants, regions, DEL, DUP, INV, INS. Builds: GRCh37.
 - ``dream-syn4`` -- Synthetic dataset 4 from the `ICGC-TCGA DREAM mutation
   calling challenge <https://www.synapse.org/#!Synapse:syn312572/wiki/62018>`_.
   Truth sets: small_variants, regions, DEL, DUP, INV. Builds: GRCh37.
+- ``dream-syn3-crossmap`` -- Synthetic dataset 3 from the `ICGC-TCGA DREAM mutation
+  calling challenge <https://www.synapse.org/#!Synapse:syn312572/wiki/62018>`_
+  converted to human build 38 coordinates with CrossMap.
+  Truth sets: small_variants, regions, DEL, DUP, INV, INS. Builds: hg38.
 - ``dream-syn4-crossmap`` -- Synthetic dataset 4 from the `ICGC-TCGA DREAM mutation
   calling challenge <https://www.synapse.org/#!Synapse:syn312572/wiki/62018>`_
   converted to human build 38 coordinates with CrossMap.
@@ -608,17 +655,55 @@ Cancer variant calling
 RNA sequencing
 ======================
 
-- ``asssemble_transcripts`` If set to True, will assemble and filter novel
-  isoforms using Cufflinks.
+- ``transcript_assembler`` If set, will assemble novel genes and transcripts and
+  merge the results into the known annotation. Can have multiple values set in a
+  list. Supports ['cufflinks', 'sailfish'].
 - ``transcriptome_align`` If set to True, will also align reads to just the
   transcriptome, for use with EBSeq and others.
+- ``expression_caller`` A list of optional expression callers to turn on.
+  Supports ['cufflinks', 'express', 'stringtie']. Sailish and count based
+  expression estimation are run by default.
+-  ``variantcaller`` Variant calling algorithm to call variants on RNA-seq data.
+  Supports [gatk] or [vardict].
+
+Single-cell RNA sequencing
+==========================
+
+- ``umi_type`` The UMI/cellular barcode scheme used for your data. Supports
+  [harvard-indrop, harvard-indrop-v2, cel-seq].
+- ``minimum_barcode_depth`` Cellular barcodes with less than this many reads
+  assigned to them are discarded (default 100,000).
+- ``cellular_barcodes`` An optional list of one or two files which have the
+  valid cellular barcodes. Provide one file if there is only one barcode and
+  two files if the barcodes are split. If no file is provided, all cellular
+  barcodes passing the ``minimum_barcode_depth`` filter are kept.
+- ``transcriptome_fasta`` An optional FASTA file of transcriptome sequences to
+  quantitate rather than the bcbio installed version.
+- ``singlecell_quantifier`` Quantifier to use for single-cell RNA-sequencing.
+  Non-academic users without a kallisto license should choose ``rapmap``.
+  Supports ``rapmap`` or ``kallisto``.
 
 smallRNA sequencing
-=====================
+===================
 
 - ``adapter`` The 3' end adapter that needs to be remove.
 - ``species`` 3 letters code to indicate the species in mirbase classification (i.e. hsa for human).
 - ``aligner`` Currently STAR is the only one tested although bowtie can be used as well.
+- ``expression_caller`` A list of expression callers to turn on: trna, seqcluster, mirdeep2
+
+ChIP sequencing
+===============
+
+- ``peakcaller`` bcbio only accepts ``macs2``
+- ``aligner`` Currently ``bowtie2`` is the only one tested
+The ``phenotype`` and ``batch`` tags need to be set under ``metadata`` in the config YAML file. The ``phenotype`` tag will specify the chip (``phenotype: chip``) and input samples (``phenotype: input``). The ``batch`` tag will specify the input-chip pairs of samples for example, ``batch: pair1``. Same input can be used for different chip samples giving a list of distinct values: ``batch: [sample1, sample2]``.
+
+You can pass different parameters for ``macs2`` adding to :ref:`config-resources`::
+
+
+        resources:
+          macs2:
+            options: ["--broad"]
 
 Quality control
 ===============
@@ -641,19 +726,28 @@ Post-processing
 - ``tools_off`` Specify third party tools to skip as part of analysis
   pipeline. Enables turning off specific components of pipelines if not
   needed. ``gemini`` provides a `GEMINI database`_ of variants for downstream
-  query during variant calling pipelines. ``vardict_somatic_filter`` disables 
-  running a post calling filter for VarDict to remove variants found in normal 
-  samples. Without ``vardict_somatic_filter`` in paired analyses no soft 
+  query during variant calling pipelines. ``vardict_somatic_filter`` disables
+  running a post calling filter for VarDict to remove variants found in normal
+  samples. Without ``vardict_somatic_filter`` in paired analyses no soft
   filtering of germline variants is performed but all high quality variants pass.
-  ``bwa-mem`` forces use of original ``bwa aln`` alignment. Without this, 
-  we use bwa mem with 70bp or longer reads. ``fastqc`` turns off quality 
-  control FastQC usage. 
+  ``bwa-mem`` forces use of original ``bwa aln`` alignment. Without this,
+  we use bwa mem with 70bp or longer reads. ``fastqc`` turns off quality
+  control FastQC usage. ``pbgzip`` turns off use of parallel bgzip
+  during preparation of alignment inputs. ``seqcluster`` turns off use of
+  seqcluster tool in srnaseq pipeline.
   ``vqsr`` turns off variant quality score recalibration for all samples.
+  ``upload_alignment`` turns off final upload of large alignment files.
   Default: [] -- all tools on.
 - ``tools_on`` Specify functionality to enable that is off by default.
-  ``svplots`` adds additional coverage and summary plots for CNVkit and
-  detected ensemble variants. ``qualimap`` runs `Qualimap <http://qualimap.bioinfo.cipf.es/>`_ (qualimap uses downsampled files and numbers here are an estimation of 1e7 reads.).
-  quality control, which can be slow.
+  ``svplots`` adds additional coverage and summary plots for CNVkit and detected
+  ensemble variants. ``qualimap`` runs `Qualimap
+  <http://qualimap.bioinfo.cipf.es/>`_ (qualimap uses downsampled files and
+  numbers here are an estimation of 1e7 reads.). ``qualimap_full`` uses the full
+  bam files but it may be slow. ``bwa-mem`` forces use of bwa mem even for
+  samples with less than 70bp reads.  ``bnd-genotype`` enables genotyping
+  of breakends in Lumpy calls, which improves accuracy but can be slow. `gvcf`
+  forces gVCF output for callers that support it (GATK HaplotypeCaller,
+  FreeBayes, Platypus).
 
 .. _CRAM format: http://www.ebi.ac.uk/ena/about/cram_toolkit
 .. _GEMINI database: https://github.com/arq5x/gemini
@@ -682,11 +776,13 @@ The recommended method to do this uses a simple majority rule ensemble
 classifier that builds a final callset based on the intersection of calls. It
 selects variants represented in at least a specified number of callers::
 
-    variantcaller: [mutect, varscan, freebayes, vardict]
+    variantcaller: [mutect2, varscan, freebayes, vardict]
     ensemble:
       numpass: 2
+      use_filtered: false
 
-This example selects variants present in 2 out of the 4 callers.
+This example selects variants present in 2 out of the 4 callers and does not use
+filtered calls (the default behavior).
 `bcbio.variation.recall`_ implements this approach, which handles speed and file
 sorting limitations in the `bcbio.variation`_ approach.
 
@@ -797,8 +893,10 @@ variable, bcbio will resolve environmental variables like::
       tmp:
         dir: $YOUR_SCRATCH_LOCATION
 
-Sample specific resources
-=========================
+.. _sample-resources:
+
+Sample or run specific resources
+================================
 
 To override any of the global resource settings in a sample specific manner, you
 write a resource section within your sample YAML configuration. For example, to
@@ -813,6 +911,15 @@ novoalign, write a sample resource specification like::
         tmp:
           dir: tmp/sampletmpdir
 
+To adjust resources for an entire run, you can add this resources specification
+at the top level of your sample YAML::
+
+     details:
+       - description: Example
+     resources:
+       default:
+         cores: 16
+
 .. _bcbio.variation: https://github.com/chapmanb/bcbio.variation
 .. _bcbio.variation.recall: https://github.com/chapmanb/bcbio.variation.recall
 .. _CloudBioLinux: https://github.com/chapmanb/cloudbiolinux
@@ -824,6 +931,29 @@ novoalign, write a sample resource specification like::
 .. _Amazon S3: http://aws.amazon.com/s3/
 .. _Galaxy Admin: http://wiki.galaxyproject.org/Admin/DataLibraries/LibrarySecurity
 .. _GATK phone home: http://gatkforums.broadinstitute.org/discussion/1250/what-is-phone-home-and-how-does-it-affect-me
+
+.. _input-file-preparation:
+
+Input file preparation
+~~~~~~~~~~~~~~~~~~~~~~
+
+Input files for supplementing analysis, like ``variant_regions`` need to match
+the specified reference genome. A common cause of confusion is the two
+chromosome naming schemes for human genome build 37: UCSC-style in hg19 (chr1,
+chr2) and Ensembl/NCBI style in GRCh37 (1, 2). To help avoid some of this
+confusion, in build 38 we only support the commonly agreed on chr1, chr2 style.
+
+It's important to ensure that the chromosome naming in your input files match
+those in the reference genome selected. bcbio will try to detect this and
+provide helpful errors if you miss it.
+
+To convert chromosome names, you can use `Devon Ryan's collection of chromosome
+mappings <https://github.com/dpryan79/ChromosomeMappings>`_ as an input to sed.
+For instance, to convert hg19 chr-style coordinates to GRCh37::
+
+      wget --no-check-certificate -qO- http://raw.githubusercontent.com/dpryan79/ChromosomeMappings/master/GRCh37_UCSC2ensembl.txt \
+         | awk '{if($1!=$2) print "s/^"$1"/"$2"/g"}' > remap.sed
+      sed -f remap.sed original.bed > final.bed
 
 Genome configuration files
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -854,6 +984,7 @@ The major sections of the file are:
 - ``srnaseq`` -- Supporting data files for smallRNA-seq analysis. Same as in
   rnaseq, the automated installer and updater handle this for supported genome
   builds.
+
 
 By default, we place the ``buildname-resources.yaml`` files next to
 the genome FASTA files in the reference directory. For custom setups,

@@ -52,19 +52,22 @@ def align(fastq_file, pair_file, ref_file, names, align_dir, data):
            "--outReadsUnmapped Fastx --outFilterMultimapNmax {max_hits} "
            "--outStd SAM {srna_opts} "
            "--outSAMunmapped Within --outSAMattributes %s " % " ".join(ALIGN_TAGS))
-    cmd += _add_sj_index_commands(fastq_file, ref_file, gtf_file)
+    cmd += _add_sj_index_commands(fastq_file, ref_file, gtf_file) if not srna else ""
     cmd += " --readFilesCommand zcat " if is_gzipped(fastq_file) else ""
     cmd += _read_group_option(names)
     fusion_mode = utils.get_in(data, ("config", "algorithm", "fusion_mode"), False)
     if fusion_mode:
-        cmd += (" --chimSegmentMin 15 --chimJunctionOverhangMin 15 "
+        cmd += (" --chimSegmentMin 12 --chimJunctionOverhangMin 12 "
+                "--chimScoreDropMax 30 --chimSegmentReadGapMax 5 "
+                "--chimScoreSeparation 5 "
                 "--chimOutType WithinSAM ")
     strandedness = utils.get_in(data, ("config", "algorithm", "strandedness"),
                                 "unstranded").lower()
     if strandedness == "unstranded" and not srna:
         cmd += " --outSAMstrandField intronMotif "
 
-    cmd += " --quantMode TranscriptomeSAM "
+    if not srna:
+        cmd += " --quantMode TranscriptomeSAM "
 
     with file_transaction(data, final_out) as tx_final_out:
         cmd += " | " + postalign.sam_to_sortbam_cl(data, tx_final_out)

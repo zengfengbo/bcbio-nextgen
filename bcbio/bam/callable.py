@@ -9,7 +9,6 @@ Regions are split to try to maintain relative uniformity across the
 genome and avoid extremes of large blocks or large numbers of
 small blocks.
 """
-import contextlib
 import copy
 import os
 import shutil
@@ -36,8 +35,9 @@ from bcbio.variation import multi as vmulti
 def parallel_callable_loci(in_bam, ref_file, data):
     config = copy.deepcopy(data["config"])
     num_cores = config["algorithm"].get("num_cores", 1)
+    out_dir = utils.safe_makedir(os.path.join(dd.get_work_dir(data), "align", dd.get_sample_name(data)))
     data = {"work_bam": in_bam, "config": config,
-            "reference": data["reference"]}
+            "reference": data["reference"], "dirs": {"out": out_dir}}
     parallel = {"type": "local", "cores": num_cores, "module": "bcbio.distributed"}
     items = [[data]]
     with prun.start(parallel, items, config, multiplier=int(num_cores)) as runner:
@@ -76,12 +76,14 @@ def _group_by_ctype(bed_file, depth, region, region_file, out_file, data):
     """
     with file_transaction(data, out_file) as tx_out_file:
         min_cov = depth["min"]
+        sort_cmd = bedutils.get_sort_cmd()
         cmd = (r"""cat {bed_file} | awk '{{if ($4 == 0) {{print $0"\tNO_COVERAGE"}} """
                r"""else if ($4 < {min_cov}) {{print $0"\tLOW_COVERAGE"}} """
                r"""else {{print $0"\tCALLABLE"}} }}' | """
                "bedtools groupby -prec 21 -g 1,5 -c 1,2,3,5 -o first,first,max,first | "
                "cut -f 3-6 | "
-               "bedtools intersect -nonamecheck -a - -b {region_file} > {tx_out_file}")
+               "bedtools intersect -nonamecheck -a - -b {region_file} | "
+               "{sort_cmd} -k1,1 -k2,2n  > {tx_out_file}")
         do.run(cmd.format(**locals()), "bedtools groupby coverage: %s" % (str(region)), data)
 
 def _get_coverage_file(in_bam, ref_file, region, region_file, depth, base_file, data):
@@ -116,7 +118,7 @@ def _regions_for_coverage(data, region, ref_file, out_file):
     callable_min_size avoids calculations for small chromosomes we won't
     split on later, saving computation and disk IO.
     """
-    variant_regions = bedutils.merge_overlaps(dd.get_variant_regions(data), data)
+    variant_regions = dd.get_variant_regions_merged(data)
     ready_region = shared.subset_variant_regions(variant_regions, region, out_file)
     custom_file = "%s-coverageregions.bed" % utils.splitext_plus(out_file)[0]
     region_size = _get_region_size(ref_file, data, region)
@@ -177,7 +179,7 @@ def sample_callable_bed(bam_file, ref_file, data):
 def calculate_offtarget(bam_file, ref_file, data):
     """Generate file of offtarget read counts for inputs with variant regions.
     """
-    vrs_file = dd.get_variant_regions(data)
+    vrs_file = dd.get_variant_regions_merged(data)
     if vrs_file:
         out_file = "%s-offtarget-stats.yaml" % os.path.splitext(bam_file)[0]
         if not utils.file_exists(out_file):
@@ -185,10 +187,12 @@ def calculate_offtarget(bam_file, ref_file, data):
                 offtarget_regions = "%s-regions.bed" % utils.splitext_plus(out_file)[0]
                 ref_bed = get_ref_bedtool(ref_file, data["config"])
                 ref_bed.subtract(pybedtools.BedTool(vrs_file), nonamecheck=True).saveas(offtarget_regions)
-                cmd = ("samtools view -u {bam_file} -L {offtarget_regions} | "
-                       "bedtools intersect -abam - -b {offtarget_regions} -f 1.0 -bed | wc -l")
+                samtools = config_utils.get_program("samtools", data["config"])
+                bedtools = config_utils.get_program("bedtools", data["config"])
+                cmd = ("{samtools} view -u {bam_file} -L {offtarget_regions} | "
+                       "{bedtools} intersect -abam - -b {offtarget_regions} -f 1.0 -bed | wc -l")
                 offtarget_count = int(subprocess.check_output(cmd.format(**locals()), shell=True))
-                cmd = "samtools idxstats {bam_file} | awk '{{s+=$3}} END {{print s}}'"
+                cmd = "{samtools} idxstats {bam_file} | awk '{{s+=$3}} END {{print s}}'"
                 mapped_count = int(subprocess.check_output(cmd.format(**locals()), shell=True))
                 with open(tx_out_file, "w") as out_handle:
                     yaml.safe_dump({"mapped": mapped_count, "offtarget": offtarget_count}, out_handle,
@@ -198,10 +202,10 @@ def calculate_offtarget(bam_file, ref_file, data):
 def get_ref_bedtool(ref_file, config, chrom=None):
     """Retrieve a pybedtool BedTool object with reference sizes from input reference.
     """
-    broad_runner = broad.runner_from_config(config, "picard")
+    broad_runner = broad.runner_from_path("picard", config)
     ref_dict = broad_runner.run_fn("picard_index_ref", ref_file)
     ref_lines = []
-    with contextlib.closing(pysam.Samfile(ref_dict, "r")) as ref_sam:
+    with pysam.Samfile(ref_dict, "r") as ref_sam:
         for sq in ref_sam.header["SQ"]:
             if not chrom or sq["SN"] == chrom:
                 ref_lines.append("%s\t%s\t%s" % (sq["SN"], 0, sq["LN"]))
@@ -398,7 +402,7 @@ def combine_sample_regions(*samples):
     Intersects all non-callable (nblock) regions from all samples in a batch,
     producing a global set of callable regions.
     """
-    samples = [x[0] for x in samples]
+    samples = utils.unpack_worlds(samples)
     # back compatibility -- global file for entire sample set
     global_analysis_file = os.path.join(samples[0]["dirs"]["work"], "analysis_blocks.bed")
     if utils.file_exists(global_analysis_file) and not _needs_region_update(global_analysis_file, samples):
@@ -457,7 +461,7 @@ def _combine_sample_regions_batch(batch, items):
         else:
             with file_transaction(items[0], analysis_file, no_analysis_file) as (tx_afile, tx_noafile):
                 def intersect_two(a, b):
-                    return a.intersect(b, u=True, nonamecheck=True)
+                    return a.intersect(b, nonamecheck=True)
                 nblock_regions = reduce(intersect_two, bed_regions).saveas(
                     "%s-nblock%s" % utils.splitext_plus(tx_afile))
                 ref_file = tz.get_in(["reference", "fasta", "base"], items[0])

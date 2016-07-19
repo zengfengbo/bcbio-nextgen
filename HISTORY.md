@@ -1,5 +1,154 @@
-## 0.9.5 (in progress)
+## 0.9.9 (18 July 2016)
 
+- Change defaults for recalibration and realignment to False. These have been
+  the recommended settings (http://bit.ly/bcbio-minimal) and no realignment now
+  matches Broad recommendations.
+- Use conda installed Java instead of requiring external installation
+  for most tools.
+- Support GATK 3.6 with Java 8 installed as part of anaconda. Older GATK
+  versions for calling and recalibration/realignment require external Java 7.
+- Re-organization of variants stats using bcftools and
+  cleaning gemini queries to get individual samples metrics.
+- Quality control back end revamped to support better parallelization
+  and pluggability of new QC metrics.
+- Support CNV calling with Seq2C for exome, targeted or amplicon experiments.
+  Thanks to Vlad Saveliev.
+- Add `fixrg` target to `bam_clean` to accept BAM inputs with correct
+  sorting and reads but that need an updated read group.
+- More robust file transactions across network filesystems, avoiding failures
+  from partially transferred files. Thanks to Sven-Eric Schelhorn.
+- Improved checking of BAM files during merge steps. Thanks to Sven-Eric Schelhorn.
+- Add SAMPLE and PEDIGREE tags to tumor/normal VCF outputs to enable
+  easier post-analysis parsing of results.
+- Add single point for annotation following variant calling to improve
+  pluggability of new annotation types.
+- Add support for running germline and somatic calling with Sentieon
+  callers (https://peerj.com/preprints/1672/). Requires license from
+  Sentieon.
+- Fix fusion calling using Tophat2. Thanks to @csardas for raising the issue.
+- Add support for kallisto quantification of single-cell RNA-seq data.
+- Add `transcriptome_fasta` option to single-cell RNA-seq. This allows 
+  the user to provide a transcriptome FASTA file to quantitate against rather
+  than use the `bcbio` provided annotation.
+- Fix naming of vardict RNA-seq variant calls. Thanks to @csardas.
+
+## 0.9.8 (20 May 2016)
+
+- Correctly install all datatargets on new installation. Previously we'd
+  skipped installing default additional data unless specified.
+- Use yamllint to find wrong syntaxes in the YAML file that are ignored
+  by pyyaml package and can affect the analysis.
+- Improve choosing split regions for batch analysis to use the unionized
+  intersection of non-callable regions. This enables better use of batches
+  with different callable regions. Thanks to Neill Gibson.
+- Fix HLA typing issues and handle HLA typing on split alignments.
+  Thanks to Miika Ahdesmaki.
+- Set `align_split_size` automatically based on input file sizes, trying to
+  provide reasonable splits and avoid too many splits for large files.
+- Fix high depth identification for whole genome runs, correctly calculating
+  it when also inferring coverage estimations. Thanks to Neill Gibson.
+- Do not remove duplicates for GATK variant calling when mark_duplicates
+  is False or running amplicon sequencing.
+- Fix installation of mutect jar via toolplus when mutect not previously
+  present in configuration.
+- Platypus: revert filtering back to defaults after additional cross-validation:
+  http://i.imgur.com/szSo5M6.png
+- Enable gVCF output with tools_on: [gvcf] for users who need gVCF output
+  for downstream analyses.
+- Avoid downscaling memory when recalibrating/realigning with GATK, since we
+  should not longer need to work around Java issues. Thanks to Luca Beltrame.
+- Do not use samblaster on genomes with greater than 32768 contigs, the
+  samblaster maximum. Thanks to morten (@mattingsdal).
+- Move to samtools for output CRAM support, using bamUtils for 8-bin compression
+  of read quality scores.
+- Remove `merge_bamprep` option and always merge realigned BAM files if run.
+- Correctly clean up additional problem characters in sample descriptions that
+  can confuse shell commands.
+
+## 0.9.7 (29 March 2016)
+
+- Use MultiQC (github.com/ewels/MultiQC) as main package to process all
+  QC metrics.
+- New install procedure for data: `--datatarget` allows installation of sub-sets
+  of supplemental data for smaller installs for small RNA only analysis. Also
+  provides a consistent framework for installing larger data types.
+- VEP data no longer installed by default. Requires `--datatarget vep`
+- During install, `--toolplus` only used for third party tools like GATK and
+  MuTect and not data installation, which moved to `--datatarget`
+- Provide `data_versions.csv` in output folder that has versions of reference
+  data used in the analysis.
+- Use sample description for BAM read group IDs, instead of lane index. This
+  allows remixing of samples after processing without potential collisions. Thanks
+  to Neill Gibson.
+- Use sample description for file names instead of lane/flowcall information.
+  Makes re-runs more stable when using template and files easier to interpret.
+  Back compatible with re-runs of old work directories.
+- Finalize support for MuTect2 with validation against the DREAM synthetic 4
+  dataset (http://imgur.com/CLqJlNF). Thanks to Alessandro (@apastore).
+- Do not bgzip inputs when they are already gzipped and do not require
+  parallelization or format conversion. Thanks to Miika Ahdesmaki.
+- Use new snpEff annotations (ANN) instead of older approach (EFF). The
+  new annotations are more interoperable and supported by GEMINI.
+- Lazy import of matplotlib libraries to avoid slow startup times.
+- Only apply ploidyfix to all female batches to remove Y chromosome. Avoids
+  confusion with file produced in other cases without any changes.
+- Improvement to bcbio CWL integration: support parallel alignment and variant
+  calling.
+- Support for Salmon and RapMap added.
+- FastRNA-seq pipeline implemented that does nothing but run Salmon with no QC.
+- Singlecell RNA-seq pipeline implemented that uses https://github.com/vals/umis
+  to handle the UMI and cellular barcode, aligns with RapMap and quantitates
+  by counting, scaling ambiguous reads by the number of transcripts they could have
+  come from.
+- Migrate bowtie and bowtie2 to handle split input alignments, bgzipped inputs,
+  and produce sorted, de-duplicated BAM files. This allows use in additional
+  standard pipelines. Thanks to Luca Beltrame.
+- Switch final upload directories for salmon and sailfish results to be of the
+  form samplename/salmon instead of samplename/salmon/samplename.
+
+## 0.9.6 (12 February 2016)
+
+- Installation uses conda packages from bioconda for Python dependencies and
+  third party tools.
+- Add macs2 to chipseq pipeline.
+- Add germline output files for somatic calling pipelines. The standard variant
+  calls identify somatic mutations different from a normal, while the
+  germline has pre-existing mutations which might contribute to cancer
+  development.
+- Use parallel bgzip for preparation of input fastq files for parallelization
+  and alignment. Thanks to Guillermo Carrasco.
+- Avoid extacting individual sample calls from pooled variant call runs for
+  samples with more than 5 individuals in a batch. Avoids slow extraction run
+  times. Thanks to Neill Gibson.
+- Add explicit check for BED file mismatches with reference genome.
+- During validation, report truth counts relative to initial truth set
+  representation and pick best metric for plotting ROC scores.
+- Remove `--sudo` flag from installer. bcbio requires install into a directory
+  structure with user permissions.
+- Add ability to tweak fastq preparation for alignment splitting so we can
+  explore alternative approaches to bgzip and grabix index.
+- Re-enable `stringtie` as an expression caller.
+- Allow `stringtie` as a transcript assembler.
+- Replace the `assemble_transcriptome` option with `transcript_assembler`, which
+  accepts a list of assemblers to run. The output of all the assemblers is
+  merged at the end with Cuffmerge.
+- Move Picard to use conda installed `picard` single executable instead of
+  custom installed java directory of jars.
+- Add library type option to Cufflinks assembly. Thanks to Konstantin (@dezzan).
+- Tag variants decomposed with vcfallelicprimitives. Thanks to Neill Gibson.
+- Fix Platypus problem where we weren't correctly specifying BED regions since
+  latest update skips over files not ending with".txt" or ".bed".
+
+## 0.9.5 (12 December 2015)
+
+- Add miRDeep2 to small RNA-seq analysis and quantify the novel miRNAs for
+  all samples.
+- Enable calling of HLA alleles with human build 38 (hg38). Turn on with the
+  `hlacaller` option.
+- Structural variant prioritization with BED files of known biologically
+  important regions. Extracts SV calls in these regions and produces a tab
+  delimited high level summary. Use the `svprioritize` option to enable.
+- Add tRNA count and figures by tdrmapper for srna-seq pipeline.
 - Avoid running callability checks on smaller chromosomes less than 1 million
   basepairs. Saves computation and disk IO on alt and support regions we don't
   split on.
@@ -8,12 +157,32 @@
 - Speed improvements for Lumpy genotyping. Move to latest svtyper and avoid
   genotyping breakends.
 - Allow use of VEP annotations on non-human analyses.
+- Filter VarDict calls with poor mapping quality support (-Q 10) which
+  trigger low frequency false positives.
 - Remove ENCODE blacklist regions when calling with VarDict and FreeBayes on
   whole genomes. Avoids long run times due to collapsed repeats near centromeres.
 - Update VarScan to 2.4.0 and rework support to allow piping between mpileup
   and VarScan to avoid filesystem IO.
 - Annotate ensemble calls with information about supporting callers. Thanks to
   Pär Larsson and Son Pham.
+- Move eXpress to expression_caller instead of being run by default.
+- rRNA calculation uses the count file instead of using counts from GATK.
+- Merge STAR fusion calls back into the BAM file. Thanks to Miika Ahdesmaki.
+- Added preliminary support for the hisat2 aligner.
+- Swapped STAR indexing to use on the fly splice junction indexing.
+- Slightly inceased default DEXseq memory requirements in bcbio_system.yaml.
+- Add support for RNA-seq for hg38 and hg38-noalt
+- Make Sailfish the default for non-count based expression estimation.
+  Produces isoform-level (combined.isoform.sf.tpm) and gene-level
+  (combined.gene.sf.tpm) TPM expression estimation.
+- Move Cufflinks to be off by default for expression estimation (turn on via
+  expression_callers if needed).
+- Add STAR fusion gene parameters suggested by @felixschlesinger.
+- Add disambiguation to Sailfish by creating a master FASTA file of all
+  transcripts from all organisms, quantitating each and separating out the
+  organism-specific transcripts after.
+- Add VarDict support for RNA-seq variant calling. Thanks to Miika Ahdesmaki and
+  Sven-Eric Schelhorn.
 
 ## 0.9.4 (14 October 2015)
 

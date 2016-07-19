@@ -1,7 +1,7 @@
 """Pipeline functionality shared amongst multiple analysis types.
 """
 import os
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 import fileinput
 import functools
 import tempfile
@@ -11,6 +11,8 @@ import pysam
 import toolz as tz
 
 from bcbio import bam, broad, utils
+from bcbio.bam import ref
+from bcbio.pipeline import datadict as dd
 from bcbio.pipeline import config_utils
 from bcbio.utils import file_exists, safe_makedir, save_diskspace
 from bcbio.distributed.transaction import file_transaction, tx_tmpdir
@@ -21,22 +23,20 @@ from bcbio.provenance import do
 def combine_bam(in_files, out_file, config):
     """Parallel target to combine multiple BAM files.
     """
-    runner = broad.runner_from_config(config)
+    runner = broad.runner_from_path("picard", config)
     runner.run_fn("picard_merge", in_files, out_file)
     for in_file in in_files:
         save_diskspace(in_file, "Merged into {0}".format(out_file), config)
     bam.index(out_file, config)
     return out_file
 
-def process_bam_by_chromosome(output_ext, file_key, default_targets=None, dir_ext_fn=None,
-                              remove_alts=False):
+def process_bam_by_chromosome(output_ext, file_key, default_targets=None, remove_alts=False):
     """Provide targets to process a BAM file by individual chromosome regions.
 
     output_ext: extension to supply to output files
     file_key: the key of the BAM file in the input data map
     default_targets: a list of extra chromosome targets to process, beyond those specified
                      in the BAM file. Useful for retrieval of non-mapped reads.
-    dir_ext_fn: A function to retrieve a directory naming extension from input data map.
     remove_alts: Do not process alternative alleles.
     """
     if default_targets is None:
@@ -44,10 +44,7 @@ def process_bam_by_chromosome(output_ext, file_key, default_targets=None, dir_ex
     def _do_work(data):
         ignore_chroms = set(_get_alt_chroms(data) if remove_alts else [])
         bam_file = data[file_key]
-        out_dir = os.path.dirname(bam_file)
-        if dir_ext_fn:
-            out_dir = os.path.join(out_dir, dir_ext_fn(data))
-
+        out_dir = tz.get_in(["dirs", "out"], data, os.path.dirname(bam_file))
         out_file = os.path.join(out_dir, "{base}{ext}".format(
                 base=os.path.splitext(os.path.basename(bam_file))[0],
                 ext=output_ext))
@@ -55,7 +52,7 @@ def process_bam_by_chromosome(output_ext, file_key, default_targets=None, dir_ex
         if not file_exists(out_file):
             work_dir = safe_makedir(
                 "{base}-split".format(base=os.path.splitext(out_file)[0]))
-            with closing(pysam.Samfile(bam_file, "rb")) as work_bam:
+            with pysam.Samfile(bam_file, "rb") as work_bam:
                 for chr_ref in list(work_bam.references) + default_targets:
                     if chr_ref not in ignore_chroms:
                         chr_out = os.path.join(work_dir,
@@ -68,14 +65,24 @@ def process_bam_by_chromosome(output_ext, file_key, default_targets=None, dir_ex
 
 def _get_alt_chroms(data):
     """Retrieve alternative contigs as defined in bwa *.alts files.
+
+    If no alt files present (when we're not aligning with bwa), work around
+    with standard set of alts based on hg38 -- anything with HLA, _alt or
+    _decoy in the name.
     """
-    alt_files = [f for f in tz.get_in(["reference", "bwa", "indexes"], data, []) if f.endswith("alt")]
     alts = []
-    for alt_file in alt_files:
-        with open(alt_file) as in_handle:
-            for line in in_handle:
-                if not line.startswith("@"):
-                    alts.append(line.split()[0].strip())
+    alt_files = [f for f in tz.get_in(["reference", "bwa", "indexes"], data, []) if f.endswith("alt")]
+    if alt_files:
+        for alt_file in alt_files:
+            with open(alt_file) as in_handle:
+                for line in in_handle:
+                    if not line.startswith("@"):
+                        alts.append(line.split()[0].strip())
+    else:
+        for contig in ref.file_contigs(dd.get_ref_file(data)):
+            if ("_alt" in contig.name or "_decoy" in contig.name or
+                  contig.name.startswith("HLA-") or ":" in contig.name):
+                alts.append(contig.name)
     return alts
 
 def write_nochr_reads(in_file, out_file, config):
@@ -120,13 +127,13 @@ def subset_bam_by_region(in_file, region, config, out_file_base=None):
         base, ext = os.path.splitext(in_file)
     out_file = "%s-subset%s%s" % (base, region, ext)
     if not file_exists(out_file):
-        with closing(pysam.Samfile(in_file, "rb")) as in_bam:
+        with pysam.Samfile(in_file, "rb") as in_bam:
             target_tid = in_bam.gettid(region)
             assert region is not None, \
                    "Did not find reference region %s in %s" % \
                    (region, in_file)
             with file_transaction(config, out_file) as tx_out_file:
-                with closing(pysam.Samfile(tx_out_file, "wb", template=in_bam)) as out_bam:
+                with pysam.Samfile(tx_out_file, "wb", template=in_bam) as out_bam:
                     for read in in_bam:
                         if read.tid == target_tid:
                             out_bam.write(read)
@@ -156,9 +163,9 @@ def _subset_bed_by_region(in_file, out_file, region, do_merge=True):
     orig_bed = pybedtools.BedTool(in_file)
     region_bed = pybedtools.BedTool("\t".join(str(x) for x in region) + "\n", from_string=True)
     if do_merge:
-        orig_bed.intersect(region_bed, nonamecheck=True).filter(lambda x: len(x) > 5).merge().saveas(out_file)
+        orig_bed.intersect(region_bed, nonamecheck=True).filter(lambda x: len(x) > 1).merge().saveas(out_file)
     else:
-        orig_bed.intersect(region_bed, nonamecheck=True).filter(lambda x: len(x) > 5).saveas(out_file)
+        orig_bed.intersect(region_bed, nonamecheck=True).filter(lambda x: len(x) > 1).saveas(out_file)
 
 def get_lcr_bed(items):
     lcr_bed = utils.get_in(items[0], ("genome_resources", "variation", "lcr"))
@@ -174,7 +181,9 @@ def remove_lcr_regions(orig_bed, items):
     if lcr_bed:
         nolcr_bed = os.path.join("%s-nolcr.bed" % (utils.splitext_plus(orig_bed)[0]))
         with file_transaction(items[0], nolcr_bed) as tx_nolcr_bed:
-            pybedtools.BedTool(orig_bed).subtract(pybedtools.BedTool(lcr_bed), nonamecheck=True).saveas(tx_nolcr_bed)
+            with bedtools_tmpdir(items[0]):
+                pybedtools.BedTool(orig_bed).subtract(pybedtools.BedTool(lcr_bed), nonamecheck=True).\
+                    saveas(tx_nolcr_bed)
         # If we have a non-empty file, convert to the LCR subtracted for downstream analysis
         if utils.file_exists(nolcr_bed):
             orig_bed = nolcr_bed

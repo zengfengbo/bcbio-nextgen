@@ -1,12 +1,12 @@
-version: 23
+version: 28
 
 aliases:
   human: true
   snpeff: hg19
-  ensembl: homo_sapiens_vep_81_GRCh37
+  ensembl: homo_sapiens_vep_83_GRCh37
 
 variation:
-  dbsnp: ../variation/dbsnp_138.vcf.gz
+  dbsnp: ../variation/dbsnp-147.vcf.gz
   train_hapmap: ../variation/hapmap_3.3.vcf.gz
   train_omni: ../variation/1000G_omni2.5.vcf.gz
   train_1000g: ../variation/1000G_phase1.snps.high_confidence.vcf.gz
@@ -15,8 +15,9 @@ variation:
   lcr: ../coverage/problem_regions/repeats/LCR.bed.gz
   sv_repeat: ../coverage/problem_regions/repeats/sv_repeat_telomere_centromere.bed
   encode_blacklist: ../coverage/problem_regions/ENCODE/wgEncodeDacMapabilityConsensusExcludable.bed
-  dbnsfp: ../variation/dbNSFP_v3.0b2c.gz
+  dbnsfp: ../variation/dbNSFP.txt.gz
   ancestral: ../variation/human_ancestor.fa.gz
+  qsignature: ../variation/qsignature.vcf
 
 rnaseq:
   transcripts: ../rnaseq/ref-transcripts.gtf
@@ -29,7 +30,10 @@ rnaseq:
 
 srnaseq:
     srna-transcripts: ../srnaseq/srna-transcripts.gtf
-    mirbase: ../srnaseq/hairpin.fa
+    mirbase-hairpin: ../srnaseq/hairpin.fa
+    mirbase-mature: ../srnaseq/mature.fa
+    mirdeep2-fasta: ../srnaseq/Rfam_for_miRDeep.fa
+    trna-fasta: ../srnaseq/trna_mature_pre.fa
 
 coverage:
   coverage_problem_dir: ../coverage/problem_regions

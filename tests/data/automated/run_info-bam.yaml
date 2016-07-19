@@ -1,3 +1,5 @@
+fc_date: '20150229'
+fc_name: 'develtest'
 upload:
   dir: upload
   # method: galaxy
@@ -18,9 +20,9 @@ details:
       validate_batch: b1
       validate_sample: test-val
   - algorithm:
-      #quality_bin: [prealignment, postrecal]
       #archive: cram
       align_split_size: 15000
+      #align_prep_method: grabix
       aligner: bwa
       #aligner: false
       #bam_clean: picard
@@ -31,13 +33,14 @@ details:
       #realign: gatk
       #recalibrate: gatk
       variantcaller: freebayes
+      #variantcaller: [gatk, gatk-haplotype]
       #effects: vep
       #svcaller: [lumpy, cnvkit, manta, metasv]
-      #svcaller: cnvkit
+      svcaller: [cnvkit, seq2c]
       #remove_lcr: true
+      tools_on: [qualimap]
       tools_off: [gemini]
       mixup_check: qsignature
-      #variantcaller: [gatk, gatk-haplotype]
       quality_format: standard
       nomap_split_size: 50
       nomap_split_targets: 100
@@ -45,6 +48,7 @@ details:
       variant_regions: ../data/automated/variant_regions-bam.bed
       coverage: ../data/automated/coverage_transcripts-bam.bed
       validate: ../data/reference_material/7_100326_FC6107FAAXX-grade.vcf
+      cwl_reporting: true
     resources:
       vep:
         options: [--pick]

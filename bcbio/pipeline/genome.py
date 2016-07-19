@@ -68,14 +68,22 @@ def abs_file_paths(xs, base_dir=None, ignore_keys=None):
                 if v.lower() == "none":
                     out[k] = None
                 elif os.path.exists(v) or objectstore.is_remote(v):
-                    out[k] = os.path.normpath(os.path.join(base_dir, objectstore.download(v, input_dir)))
+                    dl = objectstore.download(v, input_dir)
+                    if dl:
+                        out[k] = os.path.normpath(os.path.join(base_dir, dl))
+                    else:
+                        out[k] = v
                 else:
                     out[k] = v
             else:
                 out[k] = v
     elif isinstance(xs, basestring):
         if os.path.exists(xs) or objectstore.is_remote(xs):
-            out = os.path.normpath(os.path.join(base_dir, objectstore.download(xs, input_dir)))
+            dl = objectstore.download(xs, input_dir)
+            if dl:
+                out = os.path.normpath(os.path.join(base_dir, dl))
+            else:
+                out = xs
         else:
             out = xs
     else:
@@ -200,11 +208,20 @@ def get_refs(genome_build, aligner, galaxy_base, data):
             base = os.path.normpath(utils.add_full_path(cur_ref, galaxy_config["tool_data_path"]))
             if os.path.isdir(base):
                 indexes = glob.glob(os.path.join(base, "*"))
-            else:
+            elif name != "samtools":
                 indexes = glob.glob("%s*" % utils.splitext_plus(base)[0])
-            out[name_remap.get(name, name)] = {"indexes": indexes}
+            else:
+                indexes = []
+            out[name_remap.get(name, name)] = {}
             if os.path.exists(base) and os.path.isfile(base):
                 out[name_remap.get(name, name)]["base"] = base
+            if indexes:
+                out[name_remap.get(name, name)]["indexes"] = indexes
+        # add additional indices relative to the base
+        if tz.get_in(["fasta", "base"], out):
+            ref_dir, ref_filebase = os.path.split(out["fasta"]["base"])
+            out["rtg"] = os.path.normpath(os.path.join(ref_dir, os.path.pardir, "rtg",
+                                                       "%s.sdf" % (os.path.splitext(ref_filebase)[0])))
     return out
 
 def get_builds(galaxy_base):
@@ -250,6 +267,8 @@ def download_prepped_genome(genome_build, data, name, need_remap, out_dir=None):
         if not os.path.exists(ref_dir):
             if target in INPLACE_INDEX:
                 ref_file = glob.glob(os.path.normpath(os.path.join(ref_dir, os.pardir, "seq", "*.fa")))[0]
+                # Need to add genome resources so we can retrieve GTF files for STAR
+                data["genome_resources"] = get_resources(data["genome_build"], ref_file, data)
                 INPLACE_INDEX[target](ref_file, ref_dir, data)
             else:
                 # XXX Currently only supports genomes from S3 us-east-1 bucket.

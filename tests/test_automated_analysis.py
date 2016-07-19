@@ -82,10 +82,11 @@ class AutomatedAnalysisTest(unittest.TestCase):
         """
         DlInfo = collections.namedtuple("DlInfo", "fname dirname version")
         download_data = [DlInfo("110106_FC70BUKAAXX.tar.gz", None, None),
-                         DlInfo("genomes_automated_test.tar.gz", "genomes", 26),
+                         DlInfo("genomes_automated_test.tar.gz", "genomes", 30),
                          DlInfo("110907_ERP000591.tar.gz", None, None),
-                         DlInfo("100326_FC6107FAAXX.tar.gz", None, 8),
-                         DlInfo("tcga_benchmark.tar.gz", None, 3)]
+                         DlInfo("100326_FC6107FAAXX.tar.gz", None, 10),
+                         DlInfo("tcga_benchmark.tar.gz", None, 3),
+                         DlInfo("singlecell-rnaseq-test-data.tar.gz", "Harvard-inDrop", 1)]
         for dl in download_data:
             url = "http://chapmanb.s3.amazonaws.com/{fname}".format(fname=dl.fname)
             dirname = os.path.join(data_dir, os.pardir,
@@ -165,20 +166,6 @@ class AutomatedAnalysisTest(unittest.TestCase):
                   os.path.join(self.data_dir, "run_info-rnaseq.yaml")]
             subprocess.check_call(cl)
 
-    @attr(rnaseq=True)
-    @attr(sailfish=True)
-    @unittest.skip('sailfish support is in progress, skipping the unit test.')
-    def test_2_sailfish(self):
-        """Run an RNA-seq analysis with Sailfish
-        """
-        self._install_test_files(self.data_dir)
-        with make_workdir() as workdir:
-            cl = ["bcbio_nextgen.py",
-                  get_post_process_yaml(self.data_dir, workdir),
-                  os.path.join(self.data_dir, os.pardir, "110907_ERP000591"),
-                  os.path.join(self.data_dir, "run_info-sailfish.yaml")]
-            subprocess.check_call(cl)
-
     @attr(fusion=True)
     def test_2_fusion(self):
         """Run an RNA-seq analysis and test fusion genes
@@ -203,6 +190,34 @@ class AutomatedAnalysisTest(unittest.TestCase):
                   get_post_process_yaml(self.data_dir, workdir),
                   os.path.join(self.data_dir, os.pardir, "110907_ERP000591"),
                   os.path.join(self.data_dir, "run_info-star.yaml")]
+            subprocess.check_call(cl)
+
+    @attr(rnaseq=True)
+    @attr(fastrnaseq=True)
+    def test_2_fastrnaseq(self):
+        """Run a fast RNA-seq analysis
+        """
+        self._install_test_files(self.data_dir)
+        with make_workdir() as workdir:
+            cl = ["bcbio_nextgen.py",
+                  get_post_process_yaml(self.data_dir, workdir),
+                  os.path.join(self.data_dir, os.pardir, "110907_ERP000591"),
+                  os.path.join(self.data_dir, "run_info-fastrnaseq.yaml")]
+            subprocess.check_call(cl)
+
+    # XXX Turned off until umis library installed via conda
+    @expected_failure
+    @attr(rnaseq=True)
+    @attr(scrnaseq=True)
+    def test_2_scrnaseq(self):
+        """Run a single-cell RNA-seq analysis
+        """
+        self._install_test_files(self.data_dir)
+        with make_workdir() as workdir:
+            cl = ["bcbio_nextgen.py",
+                  get_post_process_yaml(self.data_dir, workdir),
+                  os.path.join(self.data_dir, os.pardir, "Harvard-inDrop"),
+                  os.path.join(self.data_dir, "run_info-scrnaseq.yaml")]
             subprocess.check_call(cl)
 
     @attr(rnaseq=True)
@@ -235,16 +250,28 @@ class AutomatedAnalysisTest(unittest.TestCase):
             subprocess.check_call(cl)
 
     @attr(srnaseq=True)
-    def test_srnaseq(self):
+    @attr(srnaseq_star=True)
+    def test_srnaseq_star(self):
         """Run an sRNA-seq analysis.
         """
         self._install_test_files(self.data_dir)
         with make_workdir() as workdir:
             cl = ["bcbio_nextgen.py",
                   get_post_process_yaml(self.data_dir, workdir),
-                  os.path.join(self.data_dir, "run_info-srnaseq.yaml")]
+                  os.path.join(self.data_dir, "run_info-srnaseq_star.yaml")]
             subprocess.check_call(cl)
 
+    @attr(srnaseq=True)
+    @attr(srnaseq_bowtie=True)
+    def test_srnaseq_bowtie(self):
+        """Run an sRNA-seq analysis.
+        """
+        self._install_test_files(self.data_dir)
+        with make_workdir() as workdir:
+            cl = ["bcbio_nextgen.py",
+                  get_post_process_yaml(self.data_dir, workdir),
+                  os.path.join(self.data_dir, "run_info-srnaseq_bowtie.yaml")]
+            subprocess.check_call(cl)
 
     @attr(chipseq=True)
     def test_chipseq(self):
@@ -396,10 +423,10 @@ class CWLTest(unittest.TestCase):
         """Create a common workflow language description and run on local installation.
         """
         with make_workdir() as workdir:
-            cl = ["bcbio_vm.py", "cwl", "../data/automated/run_info-bam.yaml",
+            cl = ["bcbio_vm.py", "cwl", "../data/automated/run_info-cwl.yaml",
                   "--systemconfig", get_post_process_yaml(self.data_dir, workdir)]
             subprocess.check_call(cl)
-            out_base = "run_info-bam-workflow/run_info-bam-main"
+            out_base = "run_info-cwl-workflow/main-run_info-cwl"
             cl = ["cwltool", "--verbose", "--preserve-environment", "PATH", "HOME", "--no-container",
                   out_base + ".cwl", out_base + "-samples.json"]
             subprocess.check_call(cl)
@@ -414,10 +441,10 @@ class CWLTest(unittest.TestCase):
         """Create a common workflow language description and run on a Docker installation.
         """
         with make_workdir() as workdir:
-            cl = ["bcbio_vm.py", "cwl", "../data/automated/run_info-bam.yaml",
+            cl = ["bcbio_vm.py", "cwl", "../data/automated/run_info-cwl.yaml",
                   "--systemconfig", get_post_process_yaml(self.data_dir, workdir)]
             subprocess.check_call(cl)
-            out_base = "run_info-bam-workflow/run_info-bam-main"
+            out_base = "run_info-cwl-workflow/main-run_info-cwl"
             cl = ["cwltool", "--verbose", out_base + ".cwl", out_base + "-samples.json"]
             subprocess.check_call(cl)
             print

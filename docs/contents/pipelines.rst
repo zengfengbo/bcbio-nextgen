@@ -81,7 +81,7 @@ the :ref:`automated-sample-config` with one of the default templates:
   Run GATK best practices, including Base Quality Score Recalibration,
   realignment and HaplotypeCaller variant calling. This requires a license from
   Broad for commercial use. You need to manually install GATK along with bcbio
-  using downloads from the GATK Broad site or Appistry (see :ref:`extra-install`).
+  using downloads from the GATK Broad site or Appistry (see :ref:`toolplus-install`).
 
 You may also want to enable :ref:`svs-pipeline` for detection of larger events,
 which work with either caller. Another good source of inspiration are the
@@ -91,6 +91,8 @@ callers and resolution of ensemble calls is generally only useful with a small
 population where you are especially concerned about sensitivity. Single
 caller detection with FreeBayes or GATK HaplotypeCaller provide good resolution
 of events.
+
+.. _population-calling:
 
 Population calling
 ==================
@@ -110,7 +112,7 @@ Batching samples results in output VCFs and GEMINI databases containing
 all merged sample calls. bcbio has two methods to call samples together:
 
 - Batch or pooled calling -- This calls all samples simultaneously by feeding
-  them to the variant caller. This works for smaller batch sizes (< 50 samples)
+  them to the variant caller. This works for smaller batch sizes (< 100 samples)
   as memory requirements become limiting in larger pools. This is the default
   approach taken when you specify a ``variantcaller`` in the
   :ref:`variant-config` configuration.
@@ -163,6 +165,21 @@ mark them with the phenotype::
 Other :ref:`config-cancer` configuration options allow tweaking of the
 processing parameters.
 
+Cancer calling handles both tumor-normal paired calls and tumor-only calling.
+For tumor-only samples, bcbio will try to remove likely germline variants
+present in the public databases like 1000 genome and ExAC, and not in COSMID.
+This runs as long as you have a local GEMINI installation and marks likely
+germline variants with a ``LowPriority`` filter. `This post has more details
+<http://bcb.io/2015/03/05/cancerval/>`_ on the approach and validation.
+
+The standard variant outputs (``sample-caller.vcf.gz``) for tumor calling
+emphasize somatic differences, those likely variants unique to the cancer. In
+addition to this file, we also produce a ``sample-caller-germline.vcf.gz`` file
+containing likely germline mutations. These are useful for identifying
+pre-existing genomic changes that can contribute to cancer development, or in
+paired cases like pre and post treatment where you may want to identify
+maintained mutations after treatment.
+
 We're actively working on improving calling to better account for the
 heterogeneity and structural variability that define cancer genomes.
 
@@ -211,39 +228,83 @@ variants of interest.
 
 RNA-seq
 ~~~~~~~
+bcbio can also be use to analyze RNA-seq data. It includes steps for quality
+control, adapter trimming, alignment, variant calling, transcriptome
+reconstruction and post-alignment quantitation at the level of the gene
+and isoform.
 
-bcbio-nextgen also implements a configurable best-practice pipeline for RNA-seq
-quality control, adapter trimming, alignment and post-alignment quantitation
+We recommend using the STAR aligner for all genomes where there are no alt
+alleles. For genomes such as hg38 that have alt alleles, hisat2 should be used
+as it handles the alts correctly and STAR does not yet. Use Tophat2 only
+if you do not have enough RAM available to run STAR (about 30 GB).
 
-- Adapter trimming:
-  - `cutadapt`_
+Our current recommendation is to run adapter trimming only if using the Tophat2
+aligner. Adapter trimming is very slow, and aligners that soft clip the ends of
+reads such as STAR and hisat2, or algorithms using pseudoalignments like
+Sailfish handle contaminant sequences at the ends properly. This makes trimming
+unnecessary. Tophat2 does not perform soft clipping so if using Topat2,
+trimming must still be done.
 
-- Sequence alignment:
-  - `tophat2`_
-  - `STAR`_
+Sailfish, which is an extremely fast alignment-free method of quantitation, is
+run for all experiments. Sailfish can accurately quantitate the expression of
+genes, even ones which are hard to quantitate with other methods (see `this
+paper <http://www.genomebiology.com/2015/16/1/177>`_ for example). It also
+quantitates at the transcript level which can help gene-level analyses (see
+`this paper <http://f1000research.com/articles/4-1521/v1>`_ for example).
+We recommend using the Sailfish quantitation rather than the counts from
+featureCounts to perform downstream quantification.
 
-- Quality control:
-  - `qualimap`_
-  - `FastQC`_
+Although we do not recommend using the featureCount based counts, the alignments
+are still useful because they give you many more quality metrics than the
+pseudoalignments from Sailfish.
 
-- Quantitation:
-  - `featureCounts`_
-  - `DEXSeq`_
-  - `eXpress`_
-
-After a run you will have in the ``upload`` directory a directory for each
-sample which contains a BAM file of the aligned and unaligned reads, a
-``cufflinks`` directory with the output of Cufflinks, including FPKM values,
-and a ``qc`` directory with plots from FastQC and RNA-SeQC. It is useful to look
-at the fastqc report an the RNA-SeQC report for each of your samples to ensure
-nothing looks abnormal.
+After a bcbio RNA-seq run there will be in the ``upload`` directory a directory
+for each sample which contains a BAM file of the aligned and unaligned reads, a
+``Sailfish`` directory with the output of Sailfish, including TPM values, and a
+``qc`` directory with plots from FastQC and qualimap.
 
 In addition to directories for each sample, in the ``upload`` directory there is
-a project directory which contains a YAML file describing some summary statistics
-about each sample and some provenance data. In that directory is also a
-``combined.counts`` file which can be used as a starting point for performing
-differential expression calling using any count-based method such as EdgeR,
-DESeq2 or voom+limma, etc.
+a project directory which contains a YAML file describing some summary
+statistics for each sample and some provenance data about the bcbio run. In that
+directory is also a ``combined.counts`` file with the featureCounts derived
+counts per cell.
+
+fast RNA-seq
+~~~~~~~~~~~~
+This mode of ``bcbio-nextgen`` quantitates transcript expression using `Salmon
+<http://salmon.readthedocs.org/en/latest/>`_ and does nothing else. It is an
+order of magnitude faster or more than running the full RNA-seq analysis. The
+cost of the increased speed is that you will have much less information about
+your samples at the end of the run, which can make troubleshooting trickier.
+
+single-cell RNA-seq
+~~~~~~~~~~~~~~~~~~~
+bcbio-nextgen supports universal molecular identifiers (UMI) based single-cell
+RNA-seq analyses. If your single-cell prep does not use universal molecular
+identifiers (UMI), you can most likely just run the standard RNA-seq pipeline
+and use the results from that. The UMI are used to discard reads which
+are possibly PCR duplicates and is very helpful for removing some of the
+PCR duplicate noise that can dominate single-cell experiments.
+
+Unlike the standard RNA-seq pipeline, the single-cell pipeline expects the FASTQ
+input files to not be separated by cellular barcode, so each file is a mix of
+cells identified by a cellular barcode (CB), and unique reads from a transcript
+are identified with a UMI. bcbio-nextgen inspects each read, identifies the
+cellular barcode and UMI and puts them in the read name. Then the reads are
+aligned to the transcriptome with `RapMap <https://github.com/COMBINE-lab/RapMap>`_
+and the number of reads aligning to each transcript is counted for each cellular
+barcode. The output is a table of counts with transcripts as the rows and
+columns as the cellular barcodes for each input FASTQ file.
+
+To extract the UMI and cellular barcodes from the read, bcbio-nextgen
+needs to know where the UMI and the cellular barcode are expected to be
+in the read. Currently support for two schemes, the inDrop system from
+the Harvard single-cell core facility and CEL-seq. If bcbio-nextgen does not
+support your UMI and barcoding scheme, please open up an issue and we will
+help implement support for it.
+
+Most of the heavy lifting for this part of bcbio-nextgen is implemented in
+the `umis <https://github.com/vals/umis>`_ repository.
 
 smallRNA-seq
 ~~~~~~~~~~~~
@@ -257,23 +318,39 @@ detection.
 
 - Sequence alignment:
   - `STAR`_ for genome annotation
-  - hisat2 for genome annotation as an option
+  - bowtie, `bowtie2` and  `hisat2`_ for genome annotation as an option
+
+- Known small RNAs quantification:
   - `seqbuster <https://github.com/lpantano/seqbuster>`_ for miRNA annotation
+  - `tdrmapper`_ for tRNA fragments annotation
 
 - Quality control:
   - `FastQC`_
 
-- Other small RNAs:
+- Other small RNAs quantification:
   - `seqcluster <https://github.com/lpantano/seqcluster>`_
+  - `mirDeep2`_ for miRNA prediction
 
-The pipeline generates a RMD template file that can be rendered with knitr.
-An example of the report can be seen `here <https://github.com/lpantano/mypubs/blob/master/srnaseq/mirqc/ready_report.md>`_.
+The pipeline generates a _RMD_ template file inside ``report`` folder
+that can be rendered with knitr. An example of the report is at `here <https://github.com/lpantano/mypubs/blob/master/srnaseq/mirqc/ready_report.md>`_.
+Count table (``counts_mirna.tst``) from mirbase miRNAs will be
+inside ``mirbase`` or final project folder.
+Input files for `isomiRs`_ package for isomiRs analysis will be
+inside each sample in ``mirbase`` folder..
+If mirdeep2 can run, count table (``counts_mirna_novel.tsv``)
+for novel miRNAs will be inside
+``mirdeep2`` or final project folder.
+tdrmapper results will be inside each sample
+inside ``tdrmapper`` or final project folder.
+
+.. _tdrmapper: https://github.com/sararselitsky/tDRmapper
+.. _miRDeep2: https://www.mdc-berlin.de/8551903/en/
+.. _isomiRs: https://github.com/lpantano/isomiRs
 
 ChIP-seq
 ~~~~~~~~
 bcbio-nextgen implements the first steps of a ChIP-seq analysis up to aligning with
-bowtie2. It doesn't do anything other than get the samples into a state
-where a peak caller like MACS2 can be used.
+bowtie2. It does alignment and peak calling with MACS2.
 
 - Adapter trimming:
   - `cutadapt`_
@@ -281,8 +358,13 @@ where a peak caller like MACS2 can be used.
 - Sequence alignment:
   - `bowtie2`_
 
+- Peak calling:
+  - `macs2`_
+
 - Quality control:
   - `FastQC`_
+
+.. _macs2: https://github.com/taoliu/MACS
 
 Standard
 ~~~~~~~~
@@ -424,7 +506,6 @@ templating system.
 .. _tophat2: http://tophat.cbcb.umd.edu/
 .. _STAR: http://code.google.com/p/rna-star/
 .. _cutadapt: http://cutadapt.readthedocs.org/en/latest/guide.html
-.. _RNA-SeQC: https://www.broadinstitute.org/cancer/cga/rna-seqc
 .. _qualimap: http://qualimap.bioinfo.cipf.es
 .. _FastQC: http://www.bioinformatics.babraham.ac.uk/projects/fastqc/
 .. _HTSeq: http://www-huber.embl.de/users/anders/HTSeq/doc/index.html
@@ -437,3 +518,5 @@ templating system.
 .. _eXpress: http://bio.math.berkeley.edu/eXpress/overview.html
 .. _featureCounts: http://bioinf.wehi.edu.au/featureCounts/
 .. _DEXSeq: https://bioconductor.org/packages/release/bioc/html/DEXSeq.html
+.. _Sailfish: https://github.com/kingsfordgroup/sailfish
+.. _hisat2: https://ccb.jhu.edu/software/hisat2/index.shtml

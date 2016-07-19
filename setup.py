@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 """Setup file and install script for NextGen sequencing analysis scripts.
 """
-import sys
 import os
 from setuptools import setup, find_packages
 
-version = "0.9.5a0"
+version = "1.0.0a0"
 
 def write_version_py():
     version_py = os.path.join(os.path.dirname(__file__), 'bcbio', 'pipeline',
@@ -21,23 +20,15 @@ def write_version_py():
         out_handle.write("\n".join(['__version__ = "%s"' % version,
                                     '__git_revision__ = "%s"' % githash]))
 
-with open("requirements.txt", "r") as f:
-    install_requires = [x.strip() for x in f.readlines() if not x.startswith(("bcbio-nextgen", "#"))]
-
-# library-only install: enable skipping of scripts and requirements for conda builds
-if "--record=/dev/null" in sys.argv:
-    scripts = []
-    install_requires = []
-    zip_safe = True
-else:
-    zip_safe = False
-    scripts = ['scripts/bcbio_nextgen.py', 'scripts/bcbio_setup_genome.py', 'scripts/bcbio_prepare_samples.py']
+install_requires = [] # install dependencies via conda
+zip_safe = False
+scripts = ['scripts/bcbio_nextgen.py', 'scripts/bcbio_setup_genome.py', 'scripts/bcbio_prepare_samples.py']
 
 write_version_py()
 setup(name="bcbio-nextgen",
       version=version,
-      author="Brad Chapman and bcbio-nextgen contributors",
-      author_email="chapmanb@50mail.com",
+      author="bcbio community",
+      author_email="biovalidation@googlegroups.com",
       description="Best-practice pipelines for fully automated high throughput sequencing analysis",
       long_description=(open('README.rst').read()),
       license="MIT",

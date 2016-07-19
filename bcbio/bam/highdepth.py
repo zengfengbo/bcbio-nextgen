@@ -10,16 +10,20 @@ import subprocess
 import sys
 
 import numpy
+import toolz as tz
 import yaml
 
 from bcbio import utils
 from bcbio.distributed.transaction import file_transaction
+from bcbio.log import logger
 from bcbio.pipeline import datadict as dd
 from bcbio.provenance import do
 
 def _get_files(data):
     work_bam = dd.get_align_bam(data) or dd.get_work_bam(data)
-    out_file = "%s-highdepth.bed" % utils.splitext_plus(work_bam)[0]
+    out_dir = utils.safe_makedir(os.path.join(tz.get_in(["dirs", "work"], data),
+                                              "align", dd.get_sample_name(data)))
+    out_file = "%s-highdepth.bed" % os.path.join(out_dir, utils.splitext_plus(os.path.basename(work_bam))[0])
     stats_file = "%s-stats.yaml" % utils.splitext_plus(out_file)[0]
     return work_bam, out_file, stats_file
 
@@ -32,7 +36,7 @@ def identify(data):
     min_coverage = 10
     window_size = 250
     work_bam, out_file, stats_file = _get_files(data)
-    if not os.path.exists(out_file):
+    if not os.path.exists(out_file) and dd.get_coverage_interval(data) == "genome":
         cores = dd.get_num_cores(data)
         with file_transaction(data, out_file) as tx_out_file:
             tx_raw_file = "%s-raw%s" % utils.splitext_plus(tx_out_file)
@@ -41,9 +45,12 @@ def identify(data):
                    "--window-size {window_size} {work_bam} "
                    "| head -n {sample_size} "
                    """| cut -f 5 | {py_cl} -l 'numpy.median([float(x) for x in l if not x.startswith("mean")])'""")
+            median_depth_out = subprocess.check_output(cmd.format(**locals()), shell=True)
             try:
-                median_cov = float(subprocess.check_output(cmd.format(**locals()), shell=True))
+                median_cov = float(median_depth_out)
             except ValueError:
+                logger.info("Skipping high coverage region detection; problem calculating median depth: %s" %
+                            median_depth_out)
                 median_cov = None
             if median_cov and not numpy.isnan(median_cov):
                 high_thresh = int(high_multiplier * median_cov)

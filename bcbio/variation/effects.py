@@ -66,23 +66,21 @@ def _special_dbkey_maps(dbkey, ref_file):
     else:
         return None
 
-def _get_perllib(tooldir=None):
-    from bcbio import install
-    if tooldir is None:
-        tooldir = install.get_defaults().get("tooldir", "/usr/local")
-    return "%s/lib/perl5" % tooldir
 
 def prep_vep_cache(dbkey, ref_file, tooldir=None, config=None):
     """Ensure correct installation of VEP cache file.
     """
     if config is None: config = {}
     resource_file = os.path.join(os.path.dirname(ref_file), "%s-resources.yaml" % dbkey)
-    os.environ["PERL5LIB"] = "%s:%s" % (_get_perllib(tooldir), os.environ.get("PERL5LIB", ""))
     if os.path.exists(resource_file):
         with open(resource_file) as in_handle:
             resources = yaml.load(in_handle)
         ensembl_name = tz.get_in(["aliases", "ensembl"], resources)
         symlink_dir = _special_dbkey_maps(dbkey, ref_file)
+        if ensembl_name and ensembl_name.find("_vep_") == -1:
+            raise ValueError("%s has ensembl an incorrect value."
+                             "It should have _vep_ in the name."
+                             "Remove line or fix the name to avoid error.")
         if symlink_dir and ensembl_name:
             species, vepv = ensembl_name.split("_vep_")
             return symlink_dir, species
@@ -98,12 +96,13 @@ def prep_vep_cache(dbkey, ref_file, tooldir=None, config=None):
                 with utils.chdir(tmp_dir):
                     subprocess.check_call(["wget", "--no-check-certificate", "-c", url])
                 vep_path = "%s/bin/" % tooldir if tooldir else ""
+                perl_exports = utils.get_perl_exports()
                 cmd = ["%svep_install.pl" % vep_path, "-a", "c", "-s", ensembl_name,
                        "-c", vep_dir, "-u", tmp_dir]
-                do.run(cmd, "Prepare VEP directory for %s" % ensembl_name)
+                do.run("%s && %s" % (perl_exports, " ".join(cmd)), "Prepare VEP directory for %s" % ensembl_name)
                 cmd = ["%svep_convert_cache.pl" % vep_path, "-species", species, "-version", vepv,
                        "-d", vep_dir]
-                do.run(cmd, "Convert VEP cache to tabix %s" % ensembl_name)
+                do.run("%s && %s" % (perl_exports, " ".join(cmd)), "Convert VEP cache to tabix %s" % ensembl_name)
                 for tmp_fname in os.listdir(tmp_dir):
                     os.remove(os.path.join(tmp_dir, tmp_fname))
                 os.rmdir(tmp_dir)
@@ -146,7 +145,7 @@ def run_vep(in_file, data):
                       ["--species", ensembl_name,
                        "--no_stats",
                        "--cache", "--offline", "--dir", vep_dir,
-                       "--symbol", "--numbers", "--biotype", "--total_length", "--canonical", "--ccds",
+                       "--symbol", "--numbers", "--biotype", "--total_length", "--canonical", "--gene_phenotype", "--ccds",
                        "--fields", ",".join(std_fields + dbnsfp_fields + loftee_fields)] + \
                        prediction_args + dbnsfp_args + loftee_args
 
@@ -167,9 +166,9 @@ def run_vep(in_file, data):
 
                     # TODO investigate hgvs reporting but requires indexing the reference file
                     # cmd += ["--hgvs", "--shift-hgvs", "--fasta", dd.get_ref_file(data)]
-                perllib = "export PERL5LIB=%s:$PERL5LIB" % _get_perllib()
+                perl_exports = utils.get_perl_exports()
                 # Remove empty fields (';;') which can cause parsing errors downstream
-                cmd = "%s && %s | sed '/^#/! s/;;/;/g' | bgzip -c > %s" % (perllib, " ".join(cmd), tx_out_file)
+                cmd = "%s && %s | sed '/^#/! s/;;/;/g' | bgzip -c > %s" % (perl_exports, " ".join(cmd), tx_out_file)
                 do.run(cmd, "Ensembl variant effect predictor", data)
     if utils.file_exists(out_file):
         vcfutils.bgzip_and_index(out_file, data["config"])
@@ -184,7 +183,7 @@ def _get_dbnsfp(data):
     """
     dbnsfp_file = tz.get_in(("genome_resources", "variation", "dbnsfp"), data)
     if dbnsfp_file and os.path.exists(dbnsfp_file):
-        annotations = ["RadialSVM_score", "RadialSVM_pred", "LR_score", "LR_pred",
+        annotations = ["RadialSVM_score", "RadialSVM_pred", "LR_score", "LR_pred", "MutationTaster_score", "MutationTaster_pred", "FATHMM_score", "FATHMM_pred", "PROVEAN_score", "PROVEAN_pred", "MetaSVM_score", "MetaSVM_pred",
                        "CADD_raw", "CADD_phred", "Reliability_index"]
         return ["--plugin", "dbNSFP,%s,%s" % (dbnsfp_file, ",".join(annotations))], annotations
     else:
@@ -209,7 +208,6 @@ def snpeff_version(args=None, data=None):
         raw_version = ""
     snpeff_version = "".join([x for x in str(raw_version)
                               if x in set(string.digits + ".")])
-    assert snpeff_version, "Did not find snpEff version information"
     return snpeff_version
 
 def snpeff_effects(vcf_in, data):
@@ -225,11 +223,6 @@ def _snpeff_args_from_config(data):
     """
     config = data["config"]
     args = []
-    # Use older EFF formatting instead of new combined ANN formatting until
-    # GEMINI supports ANN. Only used for small variants, not SVs.
-    svcaller = tz.get_in(["config", "algorithm", "svcaller_active"], data)
-    if not svcaller and LooseVersion(snpeff_version(data=data)) >= LooseVersion("4.1"):
-        args += ["-formatEff", "-classic"]
     # General supplied arguments
     resources = config_utils.get_resources("snpeff", config)
     if resources.get("options"):
@@ -237,8 +230,15 @@ def _snpeff_args_from_config(data):
     # cancer specific calling arguments
     if vcfutils.get_paired_phenotype(data):
         args += ["-cancer"]
+
+    # Skip HGVS if running structural variant calling due to errors
+    # https://github.com/chapmanb/bcbio-nextgen/issues/1205
+    # https://github.com/pcingola/SnpEff/issues/128
+    svcaller = tz.get_in(["config", "algorithm", "svcaller_active"], data)
+    if svcaller:
+        args += ["-noHgvs"]
     # Provide options tuned to reporting variants in clinical environments
-    if config["algorithm"].get("clinical_reporting"):
+    elif config["algorithm"].get("clinical_reporting"):
         args += ["-canon", "-hgvs"]
     return args
 
@@ -276,7 +276,8 @@ def get_cmd(cmd_name, datadir, config, out_file):
     memory = " ".join(resources.get("jvm_opts", ["-Xms750m", "-Xmx5g"]))
     snpeff = config_utils.get_program("snpEff", config)
     java_args = "-Djava.io.tmpdir=%s" % utils.safe_makedir(os.path.join(os.path.dirname(out_file), "tmp"))
-    cmd = "{snpeff} {memory} {java_args} {cmd_name} -dataDir {datadir}"
+    export = utils.local_path_export()
+    cmd = "{export} {snpeff} {memory} {java_args} {cmd_name} -dataDir {datadir}"
     return cmd.format(**locals())
 
 def _run_snpeff(snp_in, out_format, data):

@@ -3,17 +3,18 @@
 Script to set up a custom genome for bcbio-nextgen
 """
 
-import argparse
 from argparse import ArgumentParser
 import os
+from Bio import SeqIO
 import toolz as tz
 from bcbio.utils import safe_makedir, file_exists, chdir
-from bcbio.pipeline import config_utils
 from bcbio.distributed.transaction import file_transaction
 from bcbio.provenance import do
 from bcbio.install import (REMOTES, get_cloudbiolinux, SUPPORTED_GENOMES, SUPPORTED_INDEXES,
                            _get_data_dir)
+from bcbio.pipeline.run_info import ALLOWED_CONTIG_NAME_CHARS
 from bcbio.galaxy import loc
+from bcbio.log import logger
 from fabric.api import *
 import subprocess
 import sys
@@ -45,8 +46,17 @@ def gff3_to_gtf(gff3_file):
     if file_exists(out_file):
         return out_file
 
-    print "Converting %s to %s." %(gff3_file, out_file)
+    logger.info("Converting %s to %s." %(gff3_file, out_file))
 
+    if _is_from_ncbi(gff3_file):
+        logger.info("NCBI format detected by the presence of the %s key."
+                    % _is_from_ncbi(gff3_file))
+        _output_ncbi_gff3(gff3_file, out_file, dialect)
+    else:
+        _output_gff3(gff3_file, out_file, dialect)
+    return out_file
+
+def _output_gff3(gff3_file, out_file, dialect):
     db = gffutils.create_db(gff3_file, ":memory:")
     with file_transaction(out_file) as tx_out_file:
         with open(tx_out_file, "w") as out_handle:
@@ -57,8 +67,42 @@ def gff3_to_gtf(gff3_file):
                 attributes = gffutils.attributes.Attributes(attr)
                 feature.attributes = attributes
                 print >> out_handle, feature
-    return out_file
 
+def _output_ncbi_gff3(gff3_file, out_file, dialect):
+    gene_key = "gene"
+    id_spec = {"gene": gene_key}
+    db = gffutils.create_db(gff3_file, ":memory:", id_spec=id_spec)
+    with file_transaction(out_file) as tx_out_file:
+        with open(tx_out_file, "w") as out_handle:
+            for feature in DataIterator(db.features_of_type("exon"), dialect=dialect):
+                # Gnomon features are often missing a transcript id
+                # some malformed features are also missing the gene key
+                try:
+                    transcript_id = feature["transcript_id"]
+                except KeyError:
+                    try:
+                        transcript_id = feature[gene_key]
+                    except KeyError:
+                        continue
+                gene_id = feature[gene_key]
+                try:
+                    biotype = feature["gene_biotype"]
+                except KeyError:
+                    biotype = "unknown"
+                attr = {"transcript_id": transcript_id, "gene_id": gene_id,
+                        "gene_biotype": biotype}
+                attributes = gffutils.attributes.Attributes(attr)
+                feature.attributes = attributes
+                print >> out_handle, feature
+
+def _is_from_ncbi(gff3_file):
+    with open(gff3_file) as in_handle:
+        for line in tz.take(10000, in_handle):
+            if "Dbxref" in line:
+                return "Dbxref"
+            if "db_xref" in line:
+                return "db_xref"
+    return None
 
 def _index_w_command(dir_name, command, ref_file, ext=None):
     index_name = os.path.splitext(os.path.basename(ref_file))[0]
@@ -87,8 +131,23 @@ def setup_base_directories(genome_dir, name, build, gtf=None):
 def install_fasta_file(build_dir, fasta, build):
     out_file = os.path.join(build_dir, SEQ_DIR, build + ".fa")
     if not os.path.exists(out_file):
-        shutil.copyfile(fasta, out_file)
+        recs = SeqIO.parse(fasta, "fasta")
+        with open(out_file, "w") as out_handle:
+            SeqIO.write((_clean_rec_name(rec) for rec in recs), out_handle, "fasta")
     return out_file
+
+def _clean_rec_name(rec):
+    """Clean illegal characters in input fasta file which cause problems downstream.
+    """
+    out_id = []
+    for char in list(rec.id):
+        if char in ALLOWED_CONTIG_NAME_CHARS:
+            out_id.append(char)
+        else:
+            out_id.append("_")
+    rec.id = "".join(out_id)
+    rec.description = ""
+    return rec
 
 def install_gtf_file(build_dir, gtf, build):
     out_file = os.path.join(build_dir, RNASEQ_DIR, "ref-transcripts.gtf")
@@ -133,6 +192,8 @@ if __name__ == "__main__":
                    "directory in your bcbio-nextgen installation.")
 
     parser = ArgumentParser(description=description)
+    parser.add_argument("-c", "--cores", default=1,
+                        help="number of cores to use")
     parser.add_argument("-f", "--fasta", required=True,
                         help="FASTA file of the genome.")
     parser.add_argument("--gff3", default=False, action='store_true',
@@ -155,6 +216,7 @@ if __name__ == "__main__":
         raise ValueError("--mirbase and --srna_gtf both need a value.")
 
     env.hosts = ["localhost"]
+    env.cores = args.cores
     os.environ["PATH"] += os.pathsep + os.path.dirname(sys.executable)
     cbl = get_cloudbiolinux(REMOTES)
     sys.path.insert(0, cbl["dir"])
@@ -166,14 +228,11 @@ if __name__ == "__main__":
     fabutils = getattr(fabmod, 'fabutils')
     fabutils.configure_runsudo(env)
 
-    system_config = os.path.join(_get_data_dir(), "galaxy", "bcbio_system.yaml")
-    with open(system_config) as in_handle:
-        config = yaml.load(in_handle)
-    env.picard_home = config_utils.get_program("picard", config, ptype="dir")
-
     genome_dir = os.path.abspath(os.path.join(_get_data_dir(), "genomes"))
     args.fasta = os.path.abspath(args.fasta)
     args.gtf = os.path.abspath(args.gtf) if args.gtf else None
+    args.srna_gtf = os.path.abspath(args.srna_gtf) if args.srna_gtf else None
+
     if args.gff3:
         args.gtf = gff3_to_gtf(args.gtf)
 
@@ -214,7 +273,7 @@ if __name__ == "__main__":
     if args.gtf:
         "Preparing transcriptome."
         with chdir(os.path.join(build_dir, os.pardir)):
-            cmd = ("{sys.executable} {prepare_tx} --genome-dir {genome_dir} --gtf {gtf_file} {args.name} {args.build}")
+            cmd = ("{sys.executable} {prepare_tx} --cores {args.cores} --genome-dir {genome_dir} --gtf {gtf_file} {args.name} {args.build}")
             subprocess.check_call(cmd.format(**locals()), shell=True)
     if args.mirbase:
         "Preparing smallRNA data."
@@ -247,7 +306,7 @@ if __name__ == "__main__":
                                      lambda x: "../rnaseq/rRNA.fa")
     if args.mirbase:
         srna_gtf = ["srnaseq", "srna-transcripts"]
-        srna_mirbase = ["srnaseq", "mirbase"]
+        srna_mirbase = ["srnaseq", "mirbase-hairpin"]
         resource_dict = tz.update_in(resource_dict, srna_gtf,
                                      lambda x: "../srnaseq/srna-transcripts.gtf")
         resource_dict = tz.update_in(resource_dict, srna_mirbase,

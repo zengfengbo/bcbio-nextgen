@@ -139,6 +139,15 @@ def split_snps_indels(orig_file, ref_file, config):
             bgzip_and_index(out_file, config)
     return snp_file, indel_file
 
+def get_normal_sample(in_file):
+    """Retrieve normal sample if normal/turmor
+    """
+    with (gzip.open(in_file) if in_file.endswith(".gz") else open(in_file)) as in_handle:
+        for line in in_handle:
+            if line.startswith("##PEDIGREE"):
+                parts = line.strip().split("Original=")[1][:-1]
+                return parts
+
 def get_samples(in_file):
     """Retrieve samples present in a VCF file
     """
@@ -282,7 +291,9 @@ def concat_variant_files(orig_files, out_file, regions, ref_file, config):
     """
     if not utils.file_exists(out_file):
         sorted_files = _sort_by_region(orig_files, regions, ref_file, config)
-        exist_files = [x for x in sorted_files if os.path.exists(x)]
+        exist_files = [x for x in sorted_files if os.path.exists(x) and vcf_has_variants(x)]
+        if len(exist_files) == 0:  # no non-empty inputs, merge the empty ones
+            exist_files = [x for x in sorted_files if os.path.exists(x)]
         ready_files = run_multicore(p_bgzip_and_index, [[x, config] for x in exist_files], config)
         input_file_list = "%s-files.list" % utils.splitext_plus(out_file)[0]
         with open(input_file_list, "w") as out_handle:
@@ -296,23 +307,35 @@ def concat_variant_files(orig_files, out_file, regions, ref_file, config):
                       "-out", tx_out_file,
                       "-assumeSorted"]
             jvm_opts = broad.get_gatk_framework_opts(config, include_gatk=False)
-            cmd = [config_utils.get_program("gatk-framework", config)] + params + jvm_opts
             try:
-                do.run(cmd, "Concat variant files", log_error=False)
+                do.run(broad.gatk_cmd("gatk-framework", jvm_opts, params), "Concat variant files", log_error=False)
             except subprocess.CalledProcessError, msg:
                 if ("We require all VCFs to have complete VCF headers" in str(msg) or
-                      "Features added out of order" in str(msg)):
+                      "Features added out of order" in str(msg) or
+                      "The reference allele cannot be missing" in str(msg)):
                     os.remove(tx_out_file)
                     failed = True
                 else:
                     raise
         if failed:
-            return concat_variant_files_bcftools(input_file_list, out_file, ref_file, config)
+            return _run_concat_variant_files_bcftools(input_file_list, out_file, config)
     if out_file.endswith(".gz"):
         bgzip_and_index(out_file, config)
     return out_file
 
-def concat_variant_files_bcftools(in_list, out_file, ref_file, config):
+def concat_variant_files_bcftools(orig_files, out_file, config):
+    if not utils.file_exists(out_file):
+        exist_files = [x for x in orig_files if os.path.exists(x)]
+        ready_files = run_multicore(p_bgzip_and_index, [[x, config] for x in exist_files], config)
+        input_file_list = "%s-files.list" % utils.splitext_plus(out_file)[0]
+        with open(input_file_list, "w") as out_handle:
+            for fname in ready_files:
+                out_handle.write(fname + "\n")
+        return _run_concat_variant_files_bcftools(input_file_list, out_file, config)
+    else:
+        return bgzip_and_index(out_file, config)
+
+def _run_concat_variant_files_bcftools(in_list, out_file, config):
     """Concatenate variant files using bcftools concat.
     """
     if not utils.file_exists(out_file):
@@ -357,18 +380,18 @@ def combine_variant_files(orig_files, out_file, ref_file, config,
             params.extend(["--genotypemergeoption", "PRIORITIZE"])
             if quiet_out:
                 params.extend(["--suppressCommandLineHeader", "--setKey", "null"])
-            variant_regions = config["algorithm"].get("variant_regions", None)
-            cur_region = shared.subset_variant_regions(variant_regions, region, out_file)
-            if cur_region:
-                params += ["-L", bamprep.region_to_gatk(cur_region),
-                           "--interval_set_rule", "INTERSECTION"]
+            if region:
+                variant_regions = config["algorithm"].get("variant_regions", None)
+                cur_region = shared.subset_variant_regions(variant_regions, region, out_file)
+                if cur_region:
+                    params += ["-L", bamprep.region_to_gatk(cur_region),
+                               "--interval_set_rule", "INTERSECTION"]
             cores = tz.get_in(["algorithm", "num_cores"], config, 1)
             if cores > 1:
                 params += ["-nt", min(cores, 4)]
             memscale = {"magnitude": 0.9 * cores, "direction": "increase"} if cores > 1 else None
             jvm_opts = broad.get_gatk_framework_opts(config, memscale=memscale)
-            cmd = [config_utils.get_program("gatk-framework", config)] + jvm_opts + params
-            do.run(cmd, "Combine variant files")
+            do.run(broad.gatk_cmd("gatk-framework", jvm_opts, params), "Combine variant files")
     if out_file.endswith(".gz"):
         bgzip_and_index(out_file, config)
     if in_pipeline:
@@ -428,9 +451,11 @@ def move_vcf(orig_file, new_file):
         if os.path.exists(to_move):
             shutil.move(to_move, new_file + ext)
 
-def bgzip_and_index(in_file, config, remove_orig=True, prep_cmd="", tabix_args=None, out_dir=None):
+def bgzip_and_index(in_file, config=None, remove_orig=True, prep_cmd="", tabix_args=None, out_dir=None):
     """bgzip and tabix index an input file, handling VCF and BED.
     """
+    if config is None:
+        config = {}
     out_file = in_file if in_file.endswith(".gz") else in_file + ".gz"
     if out_dir:
         remove_orig = False

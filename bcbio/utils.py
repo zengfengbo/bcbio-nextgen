@@ -14,7 +14,7 @@ import collections
 import fnmatch
 import subprocess
 import sys
-import subprocess
+import types
 
 import toolz as tz
 import yaml
@@ -142,6 +142,32 @@ def memoize_outfile(ext=None, stem=None):
     if stem:
         return filter_to(stem)
 
+def to_single_data(input):
+    """Convert an input to a single bcbio data/world object.
+
+    Handles both single sample cases (CWL) and all sample cases (standard bcbio).
+    """
+    if (isinstance(input, (list, tuple)) and len(input) == 1):
+        return input[0]
+    else:
+        assert isinstance(input, dict), input
+        return input
+
+def unpack_worlds(items):
+    """Handle all the ways we can pass multiple samples for back-compatibility.
+    """
+    # Unpack nested lists of samples grouped together (old IPython style)
+    if isinstance(items[0], (list, tuple)) and len(items[0]) == 1:
+        out = []
+        for d in items:
+            assert len(d) == 1 and isinstance(d[0], dict), len(d)
+            out.append(d[0])
+    # Unpack a single argument with multiple samples (CWL style)
+    elif isinstance(items, (list, tuple)) and len(items) == 1 and isinstance(items[0], (list, tuple)):
+        out = items[0]
+    else:
+        out = items
+    return out
 
 def safe_makedir(dname):
     """Make a directory if it doesn't exist, handling concurrent race conditions.
@@ -258,6 +284,17 @@ def remove_safe(f):
     except OSError:
         pass
 
+def move_safe(origin, target):
+    """
+    Move file, skip if exists
+    """
+    if origin == target:
+        return origin
+    if file_exists(target):
+        return target
+    shutil.move(origin, target)
+    return target
+
 def file_plus_index(fname):
     """Convert a file name into the file plus required indexes.
     """
@@ -268,6 +305,13 @@ def file_plus_index(fname):
         return [fname, fname + exts[ext]]
     else:
         return [fname]
+
+def remove_plus(orig):
+    """Remove a fils, including biological index files.
+    """
+    for ext in ["", ".idx", ".gbi", ".tbi", ".bai"]:
+        if os.path.exists(orig + ext):
+             remove_safe(orig + ext)
 
 def copy_plus(orig, new):
     """Copy a fils, including biological index files.
@@ -317,7 +361,6 @@ def append_stem(to_transform, word):
     else:
         raise ValueError("append_stem takes a single filename as a string or "
                          "a list of filenames to transform.")
-
 
 def replace_suffix(to_transform, suffix):
     """
@@ -587,7 +630,7 @@ def Rscript_cmd():
 
     Prefers Rscript version installed via conda to a system version.
     """
-    rscript = which(os.path.join(os.path.dirname(sys.executable), "Rscript"))
+    rscript = which(os.path.join(os.path.dirname(os.path.realpath(sys.executable)), "Rscript"))
     if rscript:
         return rscript
     else:
@@ -618,6 +661,28 @@ def R_package_path(package):
         if os.path.exists(dirname):
             return dirname
     return None
+
+def perl_cmd():
+    """Retrieve path to locally installed conda Perl or first in PATH.
+    """
+    perl = which(os.path.join(os.path.dirname(os.path.realpath(sys.executable)), "perl"))
+    if perl:
+        return perl
+    else:
+        return which("perl")
+
+def get_perl_exports(tmpdir=None):
+    """Environmental exports to use conda installed perl.
+    """
+    perl_path = os.path.dirname(perl_cmd())
+    out = "unset PERL5LIB && export PATH=%s:$PATH" % (perl_path)
+    if tmpdir:
+        out += " && export TMPDIR=%s" % (tmpdir)
+    return out
+
+def local_path_export():
+    path = os.path.dirname(os.path.realpath(sys.executable))
+    return "export PATH=%s:$PATH && " % (path)
 
 def is_gzipped(fname):
     _, ext = os.path.splitext(fname)
@@ -667,3 +732,48 @@ def max_command_length():
     except ValueError:
         arg_length = DEFAULT_MAX_LENGTH
     return arg_length if arg_length > 0 else DEFAULT_MAX_LENGTH
+
+# LazyImport from NIPY
+# https://github.com/nipy/nitime/blob/master/nitime/lazyimports.py
+
+class LazyImport(types.ModuleType):
+    """
+    This class takes the module name as a parameter, and acts as a proxy for
+    that module, importing it only when the module is used, but effectively
+    acting as the module in every other way (including inside IPython with
+    respect to introspection and tab completion) with the *exception* of
+    reload()- reloading a :class:`LazyImport` raises an :class:`ImportError`.
+    >>> mlab = LazyImport('matplotlib.mlab')
+    No import happens on the above line, until we do something like call an
+    ``mlab`` method or try to do tab completion or introspection on ``mlab``
+    in IPython.
+    >>> mlab
+    <module 'matplotlib.mlab' will be lazily loaded>
+    Now the :class:`LazyImport` will do an actual import, and call the dist
+    function of the imported module.
+    >>> mlab.dist(1969,2011)
+    42.0
+    """
+    def __getattribute__(self, x):
+        # This method will be called only once, since we'll change
+        # self.__class__ to LoadedLazyImport, and __getattribute__ will point
+        # to module.__getattribute__
+        name = object.__getattribute__(self, '__name__')
+        __import__(name)
+        # if name above is 'package.foo.bar', package is returned, the docs
+        # recommend that in order to get back the full thing, that we import
+        # and then lookup the full name is sys.modules, see:
+        # http://docs.python.org/library/functions.html#__import__
+        module = sys.modules[name]
+        # Now that we've done the import, cutout the middleman and make self
+        # act as the imported module
+        class LoadedLazyImport(types.ModuleType):
+            __getattribute__ = module.__getattribute__
+            __repr__ = module.__repr__
+        object.__setattr__(self, '__class__', LoadedLazyImport)
+        # The next line will make "reload(l)" a silent no-op
+        # sys.modules[name] = self
+        return module.__getattribute__(x)
+    def __repr__(self):
+        return "<module '%s' will be lazily loaded>" %\
+                object.__getattribute__(self,'__name__')

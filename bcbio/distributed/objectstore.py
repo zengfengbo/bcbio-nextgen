@@ -87,7 +87,7 @@ class FileHandle(object):
         pass
 
     @abc.abstractmethod
-    def read(self, size):
+    def read(self, size=sys.maxint):
         """Read at most size bytes from the file (less if the read hits EOF
         before obtaining size bytes).
         """
@@ -122,7 +122,7 @@ class S3Handle(FileHandle):
         for chunk in self._key:
             yield self._decompress(chunk)
 
-    def read(self, size):
+    def read(self, size=sys.maxint):
         """Read at most size bytes from the file (less if the read hits EOF
         before obtaining size bytes).
         """
@@ -148,6 +148,7 @@ class BlobHandle(FileHandle):
         self._blob_name = blob
         self._chunk_size = chunk_size
         self._blob_properties = {}
+        self._pointer = 0
 
         if blob.endswith(".gz"):
             decompress = zlib.decompressobj(16 | zlib.MAX_WBITS)
@@ -185,13 +186,15 @@ class BlobHandle(FileHandle):
         """Reads or downloads the received blob from the system."""
         while True:
             try:
-                self._download_chunk(chunk_offset, chunk_size)
+                chunk = self._download_chunk(chunk_offset, chunk_size)
             except azure.WindowsAzureError:
                 if retries > 0:
                     retries = retries - 1
                     time.sleep(retry_wait)
                 else:
                     raise
+            else:
+                return chunk
 
     def _download_chunk(self, chunk_offset, chunk_size):
         """Reads or downloads the received blob from the system."""
@@ -203,12 +206,16 @@ class BlobHandle(FileHandle):
             blob_name=self._blob_name,
             x_ms_range=range_id)
 
-    def read(self, size):
+    def read(self, size=sys.maxint):
         """Read at most size bytes from the file (less if the read hits EOF
         before obtaining size bytes).
         """
-        return self._download_chunk_with_retries(chunk_offset=0,
-                                                 chunk_size=size)
+        blob_size = int(self.blob_properties.get('content-length'))
+        if self._pointer < blob_size:
+            chunk = self._download_chunk_with_retries(
+                chunk_offset=self._pointer, chunk_size=size)
+            self._pointer += size
+            return chunk
 
     def next(self):
         """Return the next item from the container."""
@@ -442,6 +449,8 @@ class AmazonS3(StorageManager):
                 raise
 
         s3_key = s3_bucket.get_key(file_info.key)
+        if s3_key is None:
+            raise ValueError("Did not find S3 key: %s" % filename)
         return S3Handle(s3_key)
 
 
@@ -449,12 +458,12 @@ class AzureBlob(StorageManager):
 
     """Azure Blob storage service manager."""
 
-    _BLOB_FILE = ("https://%(storage)s.blob.core.windows.net/"
-                  "%(container)s/%(blob)s")
+    _BLOB_FILE = ("https://{storage}.blob.core.windows.net/"
+                  "{container}/{blob}")
     _REMOTE_FILE = collections.namedtuple(
         "RemoteFile", ["store", "storage", "container", "blob"])
     _URL_FORMAT = re.compile(r'http.*\/\/(?P<storage>[^.]+)[^/]+\/'
-                             r'(?P<container>[^/]+)\/*(?P<blob>[^/]*)')
+                             r'(?P<container>[^/]+)\/*(?P<blob>.*)')
     _BLOB_CHUNK_DATA_SIZE = 4 * 1024 * 1024
 
     def __init__(self):
@@ -490,10 +499,10 @@ class AzureBlob(StorageManager):
         file_info = cls.parse_remote(filename)
         if not dl_dir:
             dl_dir = os.path.join(input_dir, file_info.container,
-                                  os.path.dirname(file_info.storage))
+                                  os.path.dirname(file_info.blob))
             utils.safe_makedir(dl_dir)
 
-        out_file = os.path.join(dl_dir, os.path.basename(file_info.storage))
+        out_file = os.path.join(dl_dir, os.path.basename(file_info.blob))
 
         if not utils.file_exists(out_file):
             with file_transaction({}, out_file) as tx_out_file:
@@ -533,10 +542,19 @@ class AzureBlob(StorageManager):
                           blob=file_info.blob,
                           chunk_size=cls._BLOB_CHUNK_DATA_SIZE)
 
+class ArvadosKeep:
+    """Files stored in Arvados Keep. Partial implementation, integration in bcbio-vm.
+    """
+    @classmethod
+    def check_resource(self, resource):
+        return resource.startswith("keep:")
+    @classmethod
+    def download(self, filename, input_dir, dl_dir=None):
+        return None
 
 def _get_storage_manager(resource):
     """Return a storage manager which can process this resource."""
-    for manager in (AmazonS3, AzureBlob):
+    for manager in (AmazonS3, AzureBlob, ArvadosKeep):
         if manager.check_resource(resource):
             return manager()
 

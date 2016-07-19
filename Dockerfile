@@ -1,12 +1,15 @@
 FROM stackbrew/ubuntu:14.04
 MAINTAINER Brad Chapman "https://github.com/chapmanb"
 
-# Release 0.9.5a -- https://github.com/chapmanb/bcbio-nextgen/commit/40fb5ba
+# v0.9.7 -- https://github.com/chapmanb/bcbio-nextgen/commit/52cda3e
 
 # Setup a base system 
-RUN apt-get update && apt-get install -y build-essential zlib1g-dev wget curl python-setuptools git && \
-    apt-get install -y openjdk-7-jdk openjdk-7-jre ruby libncurses5-dev libcurl4-openssl-dev libbz2-dev \
-    unzip pigz bsdmainutils && \
+RUN apt-get update && \
+    apt-get install -y build-essential unzip wget git openjdk-7-jdk openjdk-7-jre && \
+    apt-get install -y libglu1-mesa && \
+    apt-get install -y curl pigz bsdmainutils && \
+# Support inclusion in Arvados pipelines
+    apt-get install -y --no-install-recommends libcurl4-gnutls-dev mbuffer python2.7-dev python-virtualenv && \
 
 # Fake a fuse install; openjdk pulls this in 
 # https://github.com/dotcloud/docker/issues/514
@@ -27,10 +30,10 @@ RUN apt-get update && apt-get install -y build-essential zlib1g-dev wget curl py
     wget --no-check-certificate \
       https://raw.github.com/chapmanb/bcbio-nextgen/master/scripts/bcbio_nextgen_install.py && \
     python bcbio_nextgen_install.py /usr/local/share/bcbio-nextgen \
-      --nodata -u development && \
+      --isolate --nodata -u development --tooldir=/usr/local && \
     git config --global url.https://github.com/.insteadOf git://github.com/ && \
-    /usr/local/share/bcbio-nextgen/anaconda/bin/bcbio_nextgen.py upgrade --sudo --tooldir=/usr/local --tools && \
-    /usr/local/share/bcbio-nextgen/anaconda/bin/bcbio_nextgen.py upgrade --isolate -u development --tools --toolplus data  && \
+    /usr/local/share/bcbio-nextgen/anaconda/bin/bcbio_nextgen.py upgrade --isolate --tooldir=/usr/local --tools && \
+    /usr/local/share/bcbio-nextgen/anaconda/bin/bcbio_nextgen.py upgrade --isolate -u development --tools && \
 
 # setup paths
     echo 'export PATH=/usr/local/bin:$PATH' >> /etc/profile.d/bcbio.sh && \
@@ -41,12 +44,11 @@ RUN apt-get update && apt-get install -y build-essential zlib1g-dev wget curl py
     chmod a+x createsetuser && mv createsetuser /sbin && \
 
 # clean filesystem
+    cd /usr/local && \ 
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /var/tmp/* && \
-    /usr/local/share/bcbio-nextgen/anaconda/bin/conda remove --yes qt && \
     /usr/local/share/bcbio-nextgen/anaconda/bin/conda clean --yes --tarballs && \
     rm -rf /usr/local/share/bcbio-nextgen/anaconda/pkgs/qt* && \
-    rm -rf $(brew --cache) && \
     rm -rf /usr/local/.git && \
     rm -rf /.cpanm && \
     rm -rf /tmp/bcbio-nextgen-install && \
@@ -63,7 +65,6 @@ RUN apt-get update && apt-get install -y build-essential zlib1g-dev wget curl py
     chmod a+rwx /usr/local/share/bcbio-nextgen && \
     chmod a+rwx /usr/local/share/bcbio-nextgen/config && \
     chmod a+rwx /usr/local/share/bcbio-nextgen/config/*.yaml && \
-    chmod a+rwx /usr/local/share/bcbio-nextgen/gemini-config.yaml && \
 
 # Ensure permissions are set for update in place by arbitrary users
     find /usr/local -perm /u+x -execdir chmod a+x {} \; && \

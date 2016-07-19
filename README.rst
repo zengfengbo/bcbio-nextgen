@@ -96,6 +96,7 @@ Contributors
 
 - `Miika Ahdesmaki`_, AstraZeneca
 - `Luca Beltrame`_, IRCCS "Mario Negri" Institute for Pharmacological Research, Milan, Italy
+- `Christian Brueffer`_, Lund University, Lund, Sweden
 - `Alla Bushoy`_, AstraZeneca
 - `Guillermo Carrasco`_, Science for Life Laboratory, Stockholm
 - `Nick Carriero <http://www.simonsfoundation.org/about-us/staff/staff-bios/#nick-carriero-ph-d>`_, Simons Foundation
@@ -106,6 +107,7 @@ Contributors
 - `Mario Giovacchini`_, Science for Life Laboratory, Stockholm
 - `Karl Gutwin <https://twitter.com/kgutwin>`_, Biogen
 - `Jeff Hammerbacher`_, Icahn School of Medicine at Mount Sinai
+- `Oliver Hofmann <https://github.com/ohofmann>`_, Wolfson Wohl Cancer Research Center
 - `John Kern <https://github.com/kern3020>`_
 - `Rory Kirchner`_, Harvard Chan Bioinformatics Core
 - `Jakub Nowacki`_, AstraZeneca
@@ -117,9 +119,12 @@ Contributors
 - `Paul Tang`_, UCSF
 - `Roman Valls`_, Science for Life Laboratory, Stockholm
 - `Kevin Ying`_, Garvan Institute of Medical Research, Sydney, Australia
+- `Vlad Saveliev`_, AstraZeneca
+
 
 .. _Miika Ahdesmaki: https://github.com/mjafin
 .. _Luca Beltrame: https://github.com/lbeltrame
+.. _Christian Brueffer: https://github.com/cbrueffer
 .. _Guillermo Carrasco: https://github.com/guillermo-carrasco
 .. _Alla Bushoy: https://github.com/abushoy
 .. _Brad Chapman: https://github.com/chapmanb
@@ -136,6 +141,7 @@ Contributors
 .. _Jeff Hammerbacher: https://github.com/hammer
 .. _Matt Edwards: https://github.com/matted
 .. _Saket Choudhary: https://github.com/saketkc
+.. _Vlad Saveliev: https://github.com/vladsaveliev
 
 License
 -------

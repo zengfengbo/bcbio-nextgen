@@ -11,7 +11,7 @@ import pybedtools
 import numpy as np
 import toolz as tz
 
-from bcbio import install, utils
+from bcbio import utils
 from bcbio.bam import ref
 from bcbio.distributed.multi import run_multicore, zeromq_aware_logging
 from bcbio.distributed.transaction import file_transaction
@@ -20,7 +20,7 @@ from bcbio.pipeline import datadict as dd
 from bcbio.pipeline import config_utils
 from bcbio.variation import bedutils, effects, vcfutils
 from bcbio.provenance import do
-from bcbio.structural import annotate, shared, regions, plot
+from bcbio.structural import annotate, shared, plot
 
 def run(items, background=None):
     """Detect copy number variations from batched set of samples using CNVkit.
@@ -77,7 +77,7 @@ def _run_cnvkit_single(data, background=None):
         background_bams = []
         background_name = None
     ckouts = _run_cnvkit_shared([data], test_bams, background_bams, work_dir,
-                               background_name=background_name)
+                                background_name=background_name)
     if not ckouts:
         return [data]
     else:
@@ -172,9 +172,7 @@ def _cnvkit_segment(cnr_file, cov_interval, data):
     out_file = "%s.cns" % os.path.splitext(cnr_file)[0]
     if not utils.file_uptodate(out_file, cnr_file):
         with file_transaction(data, out_file) as tx_out_file:
-            local_sitelib = os.path.join(install.get_defaults().get("tooldir", "/usr/local"),
-                                            "lib", "R", "site-library")
-            cmd = [_get_cmd(), "segment", "-o", tx_out_file, "--rlibpath", local_sitelib, cnr_file]
+            cmd = [_get_cmd(), "segment", "-o", tx_out_file, cnr_file]
             if cov_interval == "genome":
                 cmd += ["--threshold", "0.00001"]
             # preferentially use conda installed Rscript
@@ -260,10 +258,14 @@ def _cnvkit_coverage(bam_file, bed_info, input_type, work_dir, data):
     bed_file = bed_info["file"]
     exts = {".target.bed": ("target", "targetcoverage.cnn"),
             ".antitarget.bed": ("antitarget", "antitargetcoverage.cnn")}
-    assert bed_file.endswith(tuple(exts.keys())), "Unexpected BED file extension for coverage %s" % bed_file
-    for orig, (cnntype, ext) in exts.items():
+    cnntype = None
+    for orig, (cur_cnntype, ext) in exts.items():
         if bed_file.endswith(orig):
+            cnntype = cur_cnntype
             break
+    if cnntype is None:
+        assert bed_file.endswith(".bed"), "Unexpected BED file extension for coverage %s" % bed_file
+        cnntype = ""
     base = _bam_to_outbase(bam_file, work_dir)
     merged_out_file = "%s.%s" % (base, ext)
     out_file = "%s-%s.%s" % (base, bed_info["i"], ext) if "i" in bed_info else merged_out_file
@@ -297,18 +299,7 @@ def _get_target_access_files(cov_interval, data, work_dir):
     pick targets, anti-targets and access files based on analysis type
     http://cnvkit.readthedocs.org/en/latest/nonhybrid.html
     """
-    base_regions = regions.get_sv_bed(data)
-    # if we don't have a configured BED or regions to use for SV caling
-    if not base_regions:
-        # For genome calls, subset to regions within 10kb of genes
-        if cov_interval == "genome":
-            base_regions = regions.get_sv_bed(data, "transcripts1e4", work_dir)
-            if base_regions:
-                base_regions = shared.remove_exclude_regions(base_regions, base_regions, [data])
-        # Finally, default to the defined variant regions
-        if not base_regions:
-            base_regions = dd.get_variant_regions(data)
-
+    base_regions = shared.get_base_cnv_regions(data, work_dir)
     target_bed = bedutils.merge_overlaps(base_regions, data, out_dir=work_dir)
     if cov_interval == "amplicon":
         return target_bed, target_bed
@@ -438,9 +429,12 @@ def _add_plots_to_output(out, data):
     loh_plot = _add_loh_plot(out, data)
     if loh_plot:
         out["plot"]["loh"] = loh_plot
-    scatter_plot = _add_scatter_plot(out, data)
-    if scatter_plot:
-        out["plot"]["scatter"] = scatter_plot
+    scatter = _add_scatter_plot(out, data)
+    if scatter:
+        out["plot"]["scatter"] = scatter
+    scatter_global = _add_global_scatter_plot(out, data)
+    if scatter_global:
+        out["plot"]["scatter_global"] = scatter_global
     return out
 
 def _get_larger_chroms(ref_file):
@@ -483,12 +477,23 @@ def _remove_haplotype_chroms(in_file, data):
                             out_handle.write(line)
     return out_file
 
+def _add_global_scatter_plot(out, data):
+    out_file = "%s-scatter_global.pdf" % os.path.splitext(out["cnr"])[0]
+    if utils.file_exists(out_file):
+        return out_file
+    cnr = _remove_haplotype_chroms(out["cnr"], data)
+    cns = _remove_haplotype_chroms(out["cns"], data)
+    with file_transaction(data, out_file) as tx_out_file:
+        cmd = [_get_cmd(), "scatter", "-s", cns, "-o", tx_out_file, cnr]
+        do.run(cmd, "CNVkit global scatter plot")
+    return out_file
+
 def _add_scatter_plot(out, data):
     out_file = "%s-scatter.pdf" % os.path.splitext(out["cnr"])[0]
-    priority_regions = dd.get_priority_regions(data)
-    if not priority_regions:
+    priority_bed = dd.get_svprioritize(data)
+    if not priority_bed:
         return None
-    priority_bed = plot._prioritize_plot_regions(pybedtools.BedTool(priority_regions), data)
+    priority_bed = plot._prioritize_plot_regions(pybedtools.BedTool(priority_bed), data, os.path.dirname(out_file))
     if utils.file_exists(out_file):
         return out_file
     cnr = _remove_haplotype_chroms(out["cnr"], data)
@@ -529,6 +534,8 @@ def _add_loh_plot(out, data):
     if len(vrn_files) > 0:
         out_file = "%s-loh.pdf" % os.path.splitext(out["cnr"])[0]
         cns = _remove_haplotype_chroms(out["cns"], data)
+        if _cnx_is_empty(cns):
+            return None
         if not utils.file_exists(out_file):
             with file_transaction(data, out_file) as tx_out_file:
                 cmd = [_get_cmd(), "loh", "-t", "-s", cns,

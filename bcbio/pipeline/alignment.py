@@ -3,6 +3,7 @@
 This works as part of the lane/flowcell process step of the pipeline.
 """
 from collections import namedtuple
+import glob
 import os
 
 import toolz as tz
@@ -37,7 +38,7 @@ TOOLS = {
     "tophat": NgsTool(tophat.align, None,
                       bowtie2.galaxy_location_file, bowtie2.remap_index_fn),
     "samtools": NgsTool(None, None, BASE_LOCATION_FILE, None),
-    "snap": NgsTool(snap.align, snap.align_bam, snap.galaxy_location_file, snap.remap_index_fn),
+    "snap": NgsTool(snap.align, None, snap.galaxy_location_file, snap.remap_index_fn),
     "star": NgsTool(star.align, None, None, star.remap_index_fn),
     "tophat2": NgsTool(tophat.align, None,
                        bowtie2.galaxy_location_file, bowtie2.remap_index_fn),
@@ -52,16 +53,14 @@ def align_to_sort_bam(fastq1, fastq2, aligner, data):
     align_dir_parts = [data["dirs"]["work"], "align", names["sample"]]
     if data.get("disambiguate"):
         align_dir_parts.append(data["disambiguate"]["genome_build"])
+    aligner_index = _get_aligner_index(aligner, data)
     align_dir = utils.safe_makedir(apply(os.path.join, align_dir_parts))
-    aligner_indexes = os.path.commonprefix(tz.get_in(("reference", aligner, "indexes"), data))
-    if aligner_indexes.endswith("."):
-        aligner_indexes = aligner_indexes[:-1]
     ref_file = tz.get_in(("reference", "fasta", "base"), data)
     if fastq1.endswith(".bam"):
-        data = _align_from_bam(fastq1, aligner, aligner_indexes, ref_file,
+        data = _align_from_bam(fastq1, aligner, aligner_index, ref_file,
                                names, align_dir, data)
     else:
-        data = _align_from_fastq(fastq1, fastq2, aligner, aligner_indexes, ref_file,
+        data = _align_from_fastq(fastq1, fastq2, aligner, aligner_index, ref_file,
                                  names, align_dir, data)
     if data["work_bam"] and utils.file_exists(data["work_bam"]):
         if not data.get("align_split"):
@@ -72,14 +71,32 @@ def align_to_sort_bam(fastq1, fastq2, aligner, data):
                 bam.index(extra_bam, data["config"])
     return data
 
+def _get_aligner_index(aligner, data):
+    """Handle multiple specifications of aligner indexes, returning value to pass to aligner.
+
+    Original bcbio case -- a list of indices.
+    CWL case: a single file with secondaryFiles staged in the same directory.
+    """
+    aligner_indexes = tz.get_in(("reference", aligner, "indexes"), data)
+    # standard bcbio case
+    if aligner_indexes and isinstance(aligner_indexes, (list, tuple)):
+        aligner_index = os.path.commonprefix(aligner_indexes)
+        if aligner_index.endswith("."):
+            aligner_index = aligner_index[:-1]
+        return aligner_index
+    # single file -- check for standard naming or directory
+    elif aligner_indexes and os.path.exists(aligner_indexes):
+        aligner_dir = os.path.dirname(aligner_indexes)
+        aligner_prefix = os.path.splitext(aligner_indexes)[0]
+        if len(glob.glob("%s.*" % aligner_prefix)) > 0:
+            return aligner_prefix
+        else:
+            return aligner_dir
+    raise ValueError("Did not find reference indices for aligner %s in genome: %s" %
+                     (aligner, data["reference"]))
+
 def _align_from_bam(fastq1, aligner, align_ref, sam_ref, names, align_dir, data):
     assert not data.get("align_split"), "Do not handle split alignments with BAM yet"
-    config = data["config"]
-    qual_bin_method = config["algorithm"].get("quality_bin")
-    if (qual_bin_method == "prealignment" or
-         (isinstance(qual_bin_method, list) and "prealignment" in qual_bin_method)):
-        out_dir = utils.safe_makedir(os.path.join(align_dir, "qualbin"))
-        fastq1 = cram.illumina_qual_bin(fastq1, sam_ref, out_dir, config)
     align_fn = TOOLS[aligner].bam_align_fn
     if align_fn is None:
         raise NotImplementedError("Do not yet support BAM alignment with %s" % aligner)

@@ -22,8 +22,9 @@ from bcbio import utils
 from bcbio.bam import fastq, sample_name
 from bcbio.distributed import objectstore
 from bcbio.upload import s3
-from bcbio.pipeline import run_info
+from bcbio.pipeline import config_utils, run_info
 from bcbio.workflow.xprize import HelpArgParser
+from bcbio.log import setup_script_logging
 
 def parse_args(inputs):
     parser = HelpArgParser(
@@ -39,6 +40,7 @@ def setup_args(parser):
     parser.add_argument("input_files", nargs="*", help="Input read files, in BAM or fastq format")
     parser.add_argument("--only-metadata", help="Ignore samples not present in metadata CSV file",
                         action="store_true", default=False)
+    setup_script_logging()
     return parser
 
 # ## Prepare sequence data inputs
@@ -73,7 +75,6 @@ KNOWN_EXTS = {".bam": "bam", ".cram": "bam", ".fq": "fastq",
               ".fastq.bz2": "fastq", ".fq.bz2": "fastq",
               ".txt.bz2": "fastq", ".bz2": "fastq"}
 
-
 def _prep_items_from_base(base, in_files):
     """Prepare a set of configuration items for input files.
     """
@@ -86,12 +87,12 @@ def _prep_items_from_base(base, in_files):
         if ext == "bam":
             for f in files:
                 details.append(_prep_bam_input(f, i, base))
-        elif ext == "fastq":
+        elif ext in ["fastq", "fq", "fasta"]:
             files = list(files)
             for fs in fastq.combine_pairs(files):
                 details.append(_prep_fastq_input(fs, base))
         else:
-            print("Ignoring ynexpected input file types %s: %s" % (ext, list(files)))
+            print("Ignoring unexpected input file types %s: %s" % (ext, list(files)))
     return details
 
 def _expand_file(x):
@@ -128,7 +129,8 @@ def name_to_config(template):
     if objectstore.is_remote(template):
         with objectstore.open(template) as in_handle:
             config = yaml.load(in_handle)
-        txt_config = None
+        with objectstore.open(template) as in_handle:
+            txt_config = in_handle.read()
     elif os.path.isfile(template):
         with open(template) as in_handle:
             txt_config = in_handle.read()
@@ -226,7 +228,7 @@ def _parse_metadata(in_handle):
         if not header[0].startswith("#"):
             break
     keys = [x.strip() for x in header[1:]]
-    for sinfo in (x for x in reader if not x[0].startswith("#")):
+    for sinfo in (x for x in reader if x and not x[0].startswith("#")):
         sinfo = [_strip_and_convert_lists(x) for x in sinfo]
         sample = sinfo[0]
         # sanity check to avoid duplicate rows
@@ -292,6 +294,7 @@ def _add_ped_metadata(name, metadata):
 
     http://pngu.mgh.harvard.edu/~purcell/plink/data.shtml#ped
     """
+    ignore = set(["-9", "undefined", "unknown", "."])
     def _ped_mapping(x, valmap):
         try:
             x = int(x)
@@ -304,12 +307,19 @@ def _add_ped_metadata(name, metadata):
     def _ped_to_gender(x):
         return _ped_mapping(x, {1: "male", 2: "female"})
     def _ped_to_phenotype(x):
-        return _ped_mapping(x, {1: "unaffected", 2: "affected"})
+        known_phenotypes = set(["unaffected", "affected", "tumor", "normal"])
+        if x in known_phenotypes:
+            return x
+        else:
+            return _ped_mapping(x, {1: "unaffected", 2: "affected"})
+    def _ped_to_batch(x):
+        if x not in ignore and x != "0":
+            return x
     with open(metadata["ped"]) as in_handle:
         for line in in_handle:
             parts = line.split("\t")[:6]
             if parts[1] == str(name):
-                for index, key, convert_fn in [(4, "sex", _ped_to_gender), (0, "batch", lambda x: x),
+                for index, key, convert_fn in [(4, "sex", _ped_to_gender), (0, "batch", _ped_to_batch),
                                                (5, "phenotype", _ped_to_phenotype)]:
                     val = convert_fn(parts[index])
                     if val is not None and key not in metadata:
@@ -329,7 +339,7 @@ def _add_metadata(item, metadata, remotes, only_metadata=False):
     """
     item_md = metadata.get(item["description"],
                            metadata.get(os.path.basename(item["files"][0]),
-                                        metadata.get(os.path.splitext(os.path.basename(item["files"][0]))[0], {})))
+                                        metadata.get(utils.splitext_plus(os.path.basename(item["files"][0]))[0], {})))
     if remotes.get("region"):
         item["algorithm"]["variant_regions"] = remotes["region"]
     TOP_LEVEL = set(["description", "genome_build", "lane", "vrn_files", "files", "analysis"])
@@ -385,16 +395,45 @@ def _convert_to_relpaths(data, work_dir):
                 data[topk][k] = os.path.relpath(v, work_dir)
     return data
 
+def _check_all_metadata_found(metadata, items):
+    """Print warning if samples in CSV file are missing in folder"""
+    for name in metadata:
+        seen = False
+        for sample in items:
+            if sample['files'][0].find(name) > -1:
+                seen = True
+        if not seen:
+            print "WARNING: sample not found %s" % name
+
+def _copy_to_configdir(items, out_dir):
+    """Copy configuration files like PED inputs to working config directory.
+    """
+    out = []
+    for item in items:
+        ped_file = tz.get_in(["metadata", "ped"], item)
+        if ped_file and os.path.exists(ped_file):
+            ped_config_file = os.path.join(out_dir, "config", os.path.basename(ped_file))
+            if not os.path.exists(ped_config_file):
+                shutil.copy(ped_file, ped_config_file)
+            item["metadata"]["ped"] = ped_config_file
+        out.append(item)
+    return out
+
 def setup(args):
     template, template_txt = name_to_config(args.template)
     base_item = template["details"][0]
     project_name, metadata, global_vars, md_file = _pname_and_metadata(args.metadata)
     remotes = _retrieve_remote([args.metadata, args.template])
     inputs = args.input_files + remotes.get("inputs", [])
+    if hasattr(args, "systemconfig") and args.systemconfig and hasattr(args, "integrations"):
+        config, _ = config_utils.load_system_config(args.systemconfig)
+        for iname, retriever in args.integrations.items():
+            if iname in config:
+                inputs += retriever.get_files(metadata, config[iname])
     raw_items = [_add_metadata(item, metadata, remotes, args.only_metadata)
                  for item in _prep_items_from_base(base_item, inputs)]
     items = [x for x in raw_items if x]
-
+    _check_all_metadata_found(metadata, items)
     out_dir = os.path.join(os.getcwd(), project_name)
     work_dir = utils.safe_makedir(os.path.join(out_dir, "work"))
     if hasattr(args, "relpaths") and args.relpaths:
@@ -402,6 +441,7 @@ def setup(args):
     out_config_file = _write_template_config(template_txt, project_name, out_dir)
     if md_file:
         shutil.copyfile(md_file, os.path.join(out_dir, "config", os.path.basename(md_file)))
+    items = _copy_to_configdir(items, out_dir)
     if len(items) == 0:
         print
         print "Template configuration file created at: %s" % out_config_file

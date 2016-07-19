@@ -1,6 +1,7 @@
 """Ipython parallel ready entry points for parallel execution
 """
 import contextlib
+import os
 
 try:
     from ipyparallel import require
@@ -9,21 +10,26 @@ except ImportError:
 
 from bcbio import heterogeneity, hla, chipseq, structural, upload
 from bcbio.bam import callable
-from bcbio.rnaseq import sailfish
+from bcbio.rnaseq import (sailfish, rapmap, salmon, umi, kallisto)
 from bcbio.distributed import ipython
 from bcbio.ngsalign import alignprep
-from bcbio import rnaseq
 from bcbio.srna import sample as srna
 from bcbio.srna import group as seqcluster
+from bcbio.chipseq import peaks
 from bcbio.pipeline import (archive, config_utils, disambiguate, sample,
                             qcsummary, shared, variation, run_info, rnaseq)
 from bcbio.provenance import system
-from bcbio.variation import (bamprep, coverage, genotype, ensemble, joint,
+from bcbio.qc import multiqc, qsignature
+from bcbio.variation import (bamprep, genotype, ensemble, joint,
                              multi, population, recalibrate, validate, vcfutils)
 from bcbio.log import logger, setup_local_logging
 
 @contextlib.contextmanager
 def _setup_logging(args):
+    # Set environment to standard to use periods for decimals and avoid localization
+    os.environ["LC_ALL"] = "C"
+    os.environ["LC"] = "C"
+    os.environ["LANG"] = "C"
     config = None
     if len(args) == 1 and isinstance(args[0], (list, tuple)):
         args = args[0]
@@ -85,10 +91,10 @@ def trim_srna_sample(*args):
         return ipython.zip_args(apply(srna.trim_srna_sample, *args))
 
 @require(srna)
-def seqbuster(*args):
+def srna_annotation(*args):
     args = ipython.unzip_args(args)
     with _setup_logging(args) as config:
-        return ipython.zip_args(apply(srna.mirbase, *args))
+        return ipython.zip_args(apply(srna.sample_annotation, *args))
 
 @require(seqcluster)
 def seqcluster_prepare(*args):
@@ -108,11 +114,65 @@ def srna_alignment(* args):
     with _setup_logging(args) as config:
         return ipython.zip_args(apply(seqcluster.run_align, *args))
 
+@require(peaks)
+def peakcalling(* args):
+    args = ipython.unzip_args(args)
+    with _setup_logging(args) as config:
+        return ipython.zip_args(apply(peaks.calling, *args))
+
 @require(sailfish)
 def run_sailfish(*args):
     args = ipython.unzip_args(args)
     with _setup_logging(args):
         return ipython.zip_args(apply(sailfish.run_sailfish, *args))
+
+@require(rapmap)
+def run_rapmap_align(*args):
+    args = ipython.unzip_args(args)
+    with _setup_logging(args):
+        return ipython.zip_args(apply(rapmap.run_rapmap_align, *args))
+
+@require(umi)
+def run_umi_transform(*args):
+    args = ipython.unzip_args(args)
+    with _setup_logging(args):
+        return ipython.zip_args(apply(umi.umi_transform, *args))
+
+@require(umi)
+def run_filter_barcodes(*args):
+    args = ipython.unzip_args(args)
+    with _setup_logging(args):
+        return ipython.zip_args(apply(umi.filter_barcodes, *args))
+
+@require(umi)
+def run_tagcount(*args):
+    args = ipython.unzip_args(args)
+    with _setup_logging(args):
+        return ipython.zip_args(apply(umi.tagcount, *args))
+
+@require(umi)
+def run_barcode_histogram(*args):
+    args = ipython.unzip_args(args)
+    with _setup_logging(args):
+        return ipython.zip_args(apply(umi.barcode_histogram, *args))
+
+@require(kallisto)
+def run_kallisto_singlecell(*args):
+    args = ipython.unzip_args(args)
+    with _setup_logging(args):
+        return ipython.zip_args(apply(kallisto.run_kallisto_singlecell, *args))
+
+@require(salmon)
+def run_salmon_bam(*args):
+    args = ipython.unzip_args(args)
+    with _setup_logging(args):
+        return ipython.zip_args(apply(salmon.run_salmon_bam, *args))
+
+@require(salmon)
+def run_salmon_reads(*args):
+    args = ipython.unzip_args(args)
+    with _setup_logging(args):
+        return ipython.zip_args(apply(salmon.run_salmon_reads, *args))
 
 @require(sample)
 def process_alignment(*args):
@@ -151,6 +211,12 @@ def delayed_bam_merge(*args):
         return ipython.zip_args(apply(sample.delayed_bam_merge, *args))
 
 @require(sample)
+def merge_split_alignments(*args):
+    args = ipython.unzip_args(args)
+    with _setup_logging(args) as config:
+        return ipython.zip_args(apply(sample.merge_split_alignments, *args))
+
+@require(sample)
 def recalibrate_sample(*args):
     args = ipython.unzip_args(args)
     with _setup_logging(args) as config:
@@ -186,17 +252,17 @@ def pipeline_summary(*args):
     with _setup_logging(args) as config:
         return ipython.zip_args(apply(qcsummary.pipeline_summary, *args))
 
-@require(qcsummary)
-def coverage_report(*args):
-    args = ipython.unzip_args(args)
-    with _setup_logging(args) as config:
-        return ipython.zip_args(apply(qcsummary.coverage_report, *args))
-
-@require(qcsummary)
+@require(qsignature)
 def qsignature_summary(*args):
     args = ipython.unzip_args(args)
     with _setup_logging(args) as config:
-        return ipython.zip_args(apply(qcsummary.qsignature_summary, *args))
+        return ipython.zip_args(apply(qsignature.summary, *args))
+
+@require(multiqc)
+def multiqc_summary(*args):
+    args = ipython.unzip_args(args)
+    with _setup_logging(args) as config:
+        return ipython.zip_args(apply(multiqc.summary, *args))
 
 @require(rnaseq)
 def generate_transcript_counts(*args):
@@ -376,6 +442,12 @@ def cufflinks_merge(*args):
     args = ipython.unzip_args(args)
     with _setup_logging(args) as config:
         return ipython.zip_args(apply(rnaseq.cufflinks_merge, *args))
+
+@require(rnaseq)
+def stringtie_merge(*args):
+    args = ipython.unzip_args(args)
+    with _setup_logging(args) as config:
+        return ipython.zip_args(apply(rnaseq.stringtie_merge, *args))
 
 @require(run_info)
 def organize_samples(*args):

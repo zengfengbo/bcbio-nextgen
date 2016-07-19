@@ -13,6 +13,53 @@ The pipeline runs in parallel in two different ways:
    Machine to machine communication occurs via messaging, using the
    `IPython parallel`_ framework.
 
+.. _tuning-cores:
+
+Tuning core and memory usage
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+bcbio has two ways to specify core usage, helping provide options for
+parallelizing different types of processes:
+
+- Total available cores: specified with ``-n`` on the commandline, this tells
+  bcbio how many total cores to use. This applies either to a local multicore
+  run or a distributed job.
+
+- Maximum cores to use for multicore processing of individual jobs. You specify
+  this in the ``resource`` section of either a sample YAML file
+  (:ref:`sample-resources`) or ``bcbio_system.yaml``. Ideally you specify this
+  in the ``default`` section (along with memory usage). For example, this would
+  specify that processes using multiple cores can get up to 16 cores::
+
+    resources:
+      default:
+        memory: 2G
+        cores: 16
+        jvm_opts: ["-Xms750m", "-Xmx2000m"]
+
+bcbio uses these settings, along with memory requests, to determine how to
+partition jobs. For example, if you had ``-n 32`` and ``cores: 16`` for a run on
+a single 32 core machine, this would run two simultaneous bwa mapping jobs using
+16 cores each.
+
+Memory specifications (both in ``memory`` and ``jvm_opts``) are per-core. bcbio
+takes care of adjusting this memory to match the cores used. In the example
+above, if bcbio was running a 16 core java proecess, it would use 32Gb of memory
+for the JVM, adjusting ``Xmx`` and ``Xms`` to match cores used. Internally bcbio
+looks at the memory and CPU usage on a machine and matches your configuration
+options to the available system resources. It will scale down core requests if
+memory is limiting, avoiding over-scheduling resources during the run.
+
+For single machine runs with a small number of samples, you generally want to
+set ``cores`` close to or equal the number of total cores you're allocating to
+the job with ``-n``. This will allow individual samples to process as fast as
+possible and take advantage of multicore software.
+
+For distributed jobs, you want to set ``cores`` to match the available cores on
+a single node in your cluster, then use ``-n`` as a multiple of this to
+determine how many nodes to spin up. For example, ``cores: 16`` and ``-n 64``
+would try to make four 16 core machines available for analysis.
+
 Multiple cores
 ~~~~~~~~~~~~~~
 Running using multiple cores only requires setting the ``-n``
@@ -100,6 +147,10 @@ There are also special ``-r`` resources parameters to support pipeline configura
 
 - ``-r conmem=4`` -- Specify the memory for the controller process, in Gb. This
   currently applies to SLURM processing and defaults to 4Gb.
+
+- ``-r minconcores=2`` -- The minimum number of cores to use for the controller
+  process. The controller one works on a single core but this can help in
+  queues where you can only specify multicore jobs.
 
 - ``-r mincores=16`` -- Specify the minimum number of cores to batch together
   for parallel single core processes like variant calling. This will run

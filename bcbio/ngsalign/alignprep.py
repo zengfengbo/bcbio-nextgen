@@ -2,6 +2,7 @@
 """
 import collections
 import copy
+import glob
 import os
 import shutil
 import subprocess
@@ -14,6 +15,7 @@ from bcbio.log import logger
 from bcbio.distributed import objectstore
 from bcbio.distributed.multi import run_multicore, zeromq_aware_logging
 from bcbio.distributed.transaction import file_transaction
+from bcbio.ngsalign import rtg
 from bcbio.pipeline import config_utils, tools
 from bcbio.pipeline import datadict as dd
 from bcbio.provenance import do
@@ -22,7 +24,10 @@ def create_inputs(data):
     """Index input reads and prepare groups of reads to process concurrently.
 
     Allows parallelization of alignment beyond processors available on a single
-    machine. Uses bgzip and grabix to prepare an indexed fastq file.
+    machine. Prepares a rtg SDF format file with build in indexes for retrieving
+    sections of files.
+
+    Retains back compatibility with bgzip/grabix approach.
     """
     aligner = tz.get_in(("config", "algorithm", "aligner"), data)
     # CRAM files must be converted to bgzipped fastq, unless not aligning.
@@ -30,38 +35,89 @@ def create_inputs(data):
     if not ("files" in data and data["files"] and aligner and (_is_cram_input(data["files"]) or
                                                                objectstore.is_remote(data["files"][0]))):
         # skip indexing on samples without input files or not doing alignment
-        # skip if we're not BAM and not doing alignment splitting
-        if ("files" not in data or not data["files"] or data["files"][0] is None or not aligner
-              or _no_index_needed(data)):
+        if ("files" not in data or not data["files"] or data["files"][0] is None or not aligner):
             return [[data]]
-    ready_files = _prep_grabix_indexes(data["files"], data["dirs"], data)
-    data["files"] = ready_files
-    # bgzip preparation takes care of converting illumina into sanger format
+    approach = "grabix" if _has_grabix_indices(data) else dd.get_align_prep_method(data)
+    if approach == "rtg":
+        data["files"] = [rtg.to_sdf(data["files"], data)]
+    else:
+        data["files"] = _prep_grabix_indexes(data["files"], data["dirs"], data)
+    # preparation converts illumina into sanger format
     data["config"]["algorithm"]["quality_format"] = "standard"
+    data = _set_align_split_size(data)
     if tz.get_in(["config", "algorithm", "align_split_size"], data):
-        splits = _find_read_splits(ready_files[0], data["config"]["algorithm"]["align_split_size"])
-    else:
-        splits = [None]
-    if len(splits) == 1:
-        return [[data]]
-    else:
         out = []
+        if approach == "rtg":
+            splits = rtg.calculate_splits(data["files"][0], data["config"]["algorithm"]["align_split_size"])
+        else:
+            splits = _find_read_splits(data["files"][0], data["config"]["algorithm"]["align_split_size"])
         for split in splits:
             cur_data = copy.deepcopy(data)
-            cur_data["align_split"] = list(split)
+            cur_data["align_split"] = split
             out.append([cur_data])
         return out
+    else:
+        return [[data]]
 
-def _no_index_needed(data):
-    return (not data["files"][0].endswith(".bam")
-            and data["config"]["algorithm"].get("align_split_size") is None)
+def _set_align_split_size(data):
+    """Set useful align_split_size, generating an estimate if it doesn't exist.
 
-def split_namedpipe_cl(in_file, data):
+    We try to split on larger inputs and avoid too many pieces, aiming for size
+    chunks of 5Gb or at most 50 maximum splits.
+
+    The size estimate used in calculations is 20 million reads for ~5Gb.
+    """
+    target_size = 5  # Gb
+    target_size_reads = 20  # million reads
+    max_splits = 100  # Avoid too many pieces, causing merge memory problems
+    val = tz.get_in(["config", "algorithm", "align_split_size"], data)
+    if val is None:
+        total_size = 0  # Gb
+        for fname in data.get("files", []):
+            if os.path.exists(fname):
+                total_size += os.path.getsize(fname) / (1024.0 * 1024.0 * 1024.0)
+        # Only set if we have files and are bigger than the target size
+        if total_size > target_size:
+            data["config"]["algorithm"]["align_split_size"] = \
+              int(1e6 * _pick_align_split_size(total_size, target_size,
+                                               target_size_reads, max_splits))
+    return data
+
+def _pick_align_split_size(total_size, target_size, target_size_reads, max_splits):
+    """Do the work of picking an alignment split size for the given criteria.
+    """
+    # Too many pieces, increase our target size to get max_splits pieces
+    if total_size // target_size > max_splits:
+        piece_size = total_size // max_splits
+        return int(piece_size * target_size_reads / target_size)
+    else:
+        return int(target_size_reads)
+
+def _has_grabix_indices(data):
+    """Back compatibility with existing runs, look for grabix indexes.
+    """
+    work_dir = (os.path.join(data["dirs"]["work"], "align_prep"))
+    return len(glob.glob(os.path.join(work_dir, "*.gbi"))) > 0
+
+def split_namedpipe_cls(pair1_file, pair2_file, data):
     """Create a commandline suitable for use as a named pipe with reads in a given region.
     """
-    grabix = config_utils.get_program("grabix", data["config"])
-    start, end = data["align_split"]
-    return "<({grabix} grab {in_file} {start} {end})".format(**locals())
+    if "align_split" in data:
+        start, end = [int(x) for x in data["align_split"].split("-")]
+    else:
+        start, end = None, None
+    if pair1_file.endswith(".sdf"):
+        assert not pair2_file, pair2_file
+        return rtg.to_fastq_apipe_cl(pair1_file, start, end)
+    else:
+        out = []
+        for in_file in pair1_file, pair2_file:
+            if in_file:
+                assert os.path.exists(in_file + ".gbi"), "Need grabix index for %s" % in_file
+                out.append("<(grabix grab {in_file} {start} {end})".format(**locals()))
+            else:
+                out.append(None)
+        return out
 
 def fastq_convert_pipe_cl(in_file, data):
     """Create an anonymous pipe converting Illumina 1.3-1.7 to Sanger.
@@ -79,8 +135,8 @@ def parallel_multiplier(items):
     """
     multiplier = 1
     for data in (x[0] for x in items):
-        if (tz.get_in(["config", "algorithm", "align_split_size"], data) or
-              tz.get_in(["algorithm", "align_split_size"], data)):
+        if (tz.get_in(["config", "algorithm", "align_split_size"], data) is not False and
+              tz.get_in(["algorithm", "align_split_size"], data) is not False):
             multiplier += 50
     return multiplier
 
@@ -89,9 +145,11 @@ def parallel_multiplier(items):
 def setup_combine(final_file, data):
     """Setup the data and outputs to allow merging data back together.
     """
+    if "align_split" not in data:
+        return final_file, data
     align_dir = os.path.dirname(final_file)
     base, ext = os.path.splitext(os.path.basename(final_file))
-    start, end = data["align_split"]
+    start, end = [int(x) for x in data["align_split"].split("-")]
     out_file = os.path.join(utils.safe_makedir(os.path.join(align_dir, "split")),
                             "%s-%s_%s%s" % (base, start, end, ext))
     data["combine"] = {"work_bam": {"out": final_file, "extras": []}}
@@ -114,18 +172,36 @@ def merge_split_alignments(samples, run_parallel):
         else:
             ready.append([data])
     ready_merge = []
+    hla_merges = []
     for mgroup in to_merge.itervalues():
         cur_data = mgroup[0]
         del cur_data["align_split"]
         for x in mgroup[1:]:
             cur_data["combine"][file_key]["extras"].append(x[file_key])
         ready_merge.append([cur_data])
+        cur_hla = None
+        for d in mgroup:
+            hla_files = tz.get_in(["hla", "fastq"], d)
+            if hla_files:
+                if not cur_hla:
+                    cur_hla = {"rgnames": {"sample": dd.get_sample_name(cur_data)},
+                               "config": cur_data["config"], "dirs": cur_data["dirs"],
+                               "hla": {"fastq": []}}
+                cur_hla["hla"]["fastq"].append(hla_files)
+        if cur_hla:
+            hla_merges.append([cur_hla])
     merged = run_parallel("delayed_bam_merge", ready_merge)
+    hla_merge_raw = run_parallel("merge_split_alignments", hla_merges)
+    hla_merges = {}
+    for hla_merge in [x[0] for x in hla_merge_raw]:
+        hla_merges[dd.get_sample_name(hla_merge)] = tz.get_in(["hla", "fastq"], hla_merge)
     # Add stable 'align_bam' target to use for retrieving raw alignment
     out = []
     for data in [x[0] for x in merged + ready]:
         if data.get("work_bam"):
             data["align_bam"] = data["work_bam"]
+        if dd.get_sample_name(data) in hla_merges:
+            data["hla"]["fastq"] = hla_merges[dd.get_sample_name(data)]
         out.append([data])
     return out
 
@@ -149,7 +225,7 @@ def _find_read_splits(in_file, split_size):
         new = last + split_lines - 1
         chunks.append((last, min(new, num_lines)))
         last = new + 1
-    return chunks
+    return ["%s-%s" % (s, e) for s, e in chunks]
 
 # ## bgzip and grabix
 
@@ -159,16 +235,28 @@ def _is_bam_input(in_files):
 def _is_cram_input(in_files):
     return in_files and in_files[0].endswith(".cram") and (len(in_files) == 1 or in_files[1] is None)
 
+def _ready_gzip_fastq(in_files, data):
+    """Check if we have gzipped fastq and don't need format conversion or splitting.
+    """
+    all_gzipped = all([not x or x.endswith(".gz") for x in in_files])
+    needs_convert = tz.get_in(["config", "algorithm", "quality_format"], data, "").lower() == "illumina"
+    do_splitting = tz.get_in(["config", "algorithm", "align_split_size"], data) is not False
+    return all_gzipped and not needs_convert and not do_splitting and not objectstore.is_remote(in_files[0])
+
 def _prep_grabix_indexes(in_files, dirs, data):
     if _is_bam_input(in_files):
         out = _bgzip_from_bam(in_files[0], dirs, data["config"])
     elif _is_cram_input(in_files):
         out = _bgzip_from_cram(in_files[0], dirs, data)
+    elif _ready_gzip_fastq(in_files, data):
+        out = in_files
     else:
-        out = run_multicore(_bgzip_from_fastq,
-                            [[{"in_file": x, "dirs": dirs, "config": data["config"], "rgnames": data["rgnames"]}]
-                             for x in in_files if x],
-                            data["config"])
+        inputs = [{"in_file": x, "dirs": dirs, "config": data["config"], "rgnames": data["rgnames"]}
+                  for x in in_files if x]
+        if "pbgzip" not in dd.get_tools_off(data):
+            out = [_bgzip_from_fastq(d) for d in inputs]
+        else:
+            out = run_multicore(_bgzip_from_fastq_parallel, [[d] for d in inputs], data["config"])
     items = [[{"bgzip_file": x, "config": copy.deepcopy(data["config"])}] for x in out if x]
     run_multicore(_grabix_index, items, data["config"])
     return out
@@ -359,7 +447,7 @@ def _grabix_index(data):
     config = data["config"]
     grabix = config_utils.get_program("grabix", config)
     gbi_file = in_file + ".gbi"
-    if tz.get_in(["algorithm", "align_split_size"], config):
+    if tz.get_in(["algorithm", "align_split_size"], config) is not False:
         if not utils.file_exists(gbi_file) or _is_partial_index(gbi_file):
             do.run([grabix, "index", in_file], "Index input with grabix: %s" % os.path.basename(in_file))
     return [gbi_file]
@@ -375,6 +463,9 @@ def _is_partial_index(gbi_file):
 
 @utils.map_wrap
 @zeromq_aware_logging
+def _bgzip_from_fastq_parallel(data):
+    return [_bgzip_from_fastq(data)]
+
 def _bgzip_from_fastq(data):
     """Prepare a bgzipped file from a fastq input, potentially gzipped (or bgzipped already).
     """
@@ -395,7 +486,7 @@ def _bgzip_from_fastq(data):
     else:
         out_file = os.path.join(work_dir, "%s_%s" % (dd.get_sample_name(data), os.path.basename(in_file)))
         utils.symlink_plus(in_file, out_file)
-    return [out_file]
+    return out_file
 
 def _bgzip_file(in_file, config, work_dir, needs_bgzip, needs_gunzip, needs_convert):
     """Handle bgzip of input file, potentially gunzipping an existing file.

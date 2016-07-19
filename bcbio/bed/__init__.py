@@ -1,5 +1,22 @@
 import pybedtools as bt
+from bcbio.utils import file_exists
+from bcbio import utils
 import six
+
+def decomment(bed_file, out_file):
+    """
+    clean a BED file
+    """
+    if file_exists(out_file):
+        return out_file
+
+    with utils.open_gzipsafe(bed_file) as in_handle, open(out_file, "w") as out_handle:
+        for line in in_handle:
+            if line.startswith("#") or line.startswith("browser") or line.startswith("track"):
+                continue
+            else:
+                out_handle.write(line)
+    return out_file
 
 def concat(bed_files, catted=None):
     """

@@ -5,6 +5,7 @@ import collections
 import glob
 import math
 import os
+import pprint
 import sys
 import yaml
 
@@ -43,7 +44,7 @@ def update_w_custom(config, lane_info):
 
 # ## Retrieval functions
 
-def load_system_config(config_file=None, work_dir=None):
+def load_system_config(config_file=None, work_dir=None, allow_missing=False):
     """Load bcbio_system.yaml configuration file, handling standard defaults.
 
     Looks for configuration file in default location within
@@ -58,11 +59,13 @@ def load_system_config(config_file=None, work_dir=None):
         test_config = os.path.join(base_dir, "galaxy", config_file)
         if os.path.exists(test_config):
             config_file = test_config
+        elif allow_missing:
+            config_file = None
         else:
             raise ValueError("Could not find input system configuration file %s, "
                              "including inside standard directory %s" %
                              (config_file, os.path.join(base_dir, "galaxy")))
-    config = load_config(config_file)
+    config = load_config(config_file) if config_file else {}
     if docker_config:
         assert work_dir is not None, "Need working directory to merge docker config"
         config_file = os.path.join(work_dir, "%s-merged%s" % os.path.splitext(os.path.basename(config_file)))
@@ -180,39 +183,45 @@ def get_program(name, config, ptype="cmd", default=None):
             if not key in pconfig:
                 pconfig[key] = old_config
     if ptype == "cmd":
-        return _get_program_cmd(name, pconfig, default)
+        return _get_program_cmd(name, pconfig, config, default)
     elif ptype == "dir":
         return _get_program_dir(name, pconfig)
     else:
         raise ValueError("Don't understand program type: %s" % ptype)
 
 def _get_check_program_cmd(fn):
-
-    def wrap(name, config, default):
-        program = expand_path(fn(name, config, default))
+    def wrap(name, pconfig, config, default):
         is_ok = lambda f: os.path.isfile(f) and os.access(f, os.X_OK)
-        if is_ok(program): return program
-
-        for adir in os.environ['PATH'].split(":"):
-            if is_ok(os.path.join(adir, program)):
-                return os.path.join(adir, program)
+        bcbio_system = config.get("bcbio_system", None)
+        if bcbio_system:
+            system_bcbio_path = os.path.join(os.path.dirname(bcbio_system),
+                                             os.pardir, "anaconda", "bin", name)
+            if is_ok(system_bcbio_path):
+                return system_bcbio_path
         # support bioconda installed programs
         if is_ok(os.path.join(os.path.dirname(sys.executable), name)):
             return (os.path.join(os.path.dirname(sys.executable), name))
-        else:
-            raise CmdNotFound(" ".join(map(repr, (fn.func_name, name, config, default))))
+        # find system bioconda installed programs if using private code install
+        program = expand_path(fn(name, pconfig, config, default))
+        if is_ok(program):
+            return program
+        # search the PATH now
+        for adir in os.environ['PATH'].split(":"):
+            if is_ok(os.path.join(adir, program)):
+                return os.path.join(adir, program)
+        raise CmdNotFound(" ".join(map(repr, (fn.func_name, name, pconfig, default))))
     return wrap
 
 @_get_check_program_cmd
-def _get_program_cmd(name, config, default):
+def _get_program_cmd(name, pconfig, config, default):
     """Retrieve commandline of a program.
     """
-    if config is None:
+    if pconfig is None:
         return name
-    elif isinstance(config, basestring):
-        return config
-    elif "cmd" in config:
-        return config["cmd"]
+    elif isinstance(pconfig, basestring):
+        return pconfig
+    elif "cmd" in pconfig:
+        return pconfig["cmd"]
     elif default is not None:
         return default
     else:
@@ -255,6 +264,8 @@ def is_nested_config_arg(x):
 def get_algorithm_config(xs):
     """Flexibly extract algorithm configuration for a sample from any function arguments.
     """
+    if isinstance(xs, dict):
+        xs = [xs]
     for x in xs:
         if is_std_config_arg(x):
             return x["algorithm"]
@@ -263,7 +274,7 @@ def get_algorithm_config(xs):
         elif isinstance(x, (list, tuple)) and is_nested_config_arg(x[0]):
             return x[0]["config"]["algorithm"]
     raise ValueError("Did not find algorithm configuration in items: {0}"
-                     .format(xs))
+                     .format(pprint.pformat(xs)))
 
 def get_dataarg(args):
     """Retrieve the world 'data' argument from a set of input parameters.
@@ -341,7 +352,7 @@ def adjust_memory(val, magnitude, direction="increase", out_modifier=""):
             else:
                 raise ValueError("Unexpected decrease in memory: %s by %s" % (val, magnitude))
         amount = int(new_amount)
-    elif direction == "increase":
+    elif direction == "increase" and magnitude > 1:
         # for increases with multiple cores, leave small percentage of
         # memory for system to maintain process running resource and
         # avoid OOM killers
@@ -427,3 +438,13 @@ def get_transcript_refflat(genome_dir):
 
 def get_rRNA_sequence(genome_dir):
     return os.path.join(genome_dir, "rnaseq", "rRNA.fa")
+
+def program_installed(program, data):
+    """
+    returns True if the path to a program can be found
+    """
+    try:
+        path = get_program(program, data)
+    except CmdNotFound:
+        return False
+    return True

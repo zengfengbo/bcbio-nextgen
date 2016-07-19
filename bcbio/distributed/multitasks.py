@@ -4,18 +4,52 @@ from bcbio import heterogeneity, hla, structural, utils, chipseq, upload
 from bcbio.bam import callable
 from bcbio.srna import sample as srna
 from bcbio.srna import group as seqcluster
+from bcbio.chipseq import peaks
 from bcbio.cwl import create as cwl_create
-from bcbio.rnaseq import (sailfish)
+from bcbio.rnaseq import (sailfish, rapmap, salmon, umi, kallisto)
 from bcbio.ngsalign import alignprep
-from bcbio.pipeline import (archive, disambiguate, qcsummary, sample,
+from bcbio.pipeline import (archive, disambiguate, qcsummary, region, sample,
                             main, shared, variation, run_info, rnaseq)
-from bcbio.variation import (bamprep, bedutils, coverage, genotype, ensemble,
+from bcbio.qc import multiqc, qsignature
+from bcbio.variation import (bamprep, bedutils, genotype, ensemble,
                              joint, multi, population, recalibrate, validate,
                              vcfutils)
 
 @utils.map_wrap
+def run_tagcount(*args):
+    return umi.tagcount(*args)
+
+@utils.map_wrap
+def run_filter_barcodes(*args):
+    return umi.filter_barcodes(*args)
+
+@utils.map_wrap
+def run_barcode_histogram(*args):
+    return umi.barcode_histogram(*args)
+
+@utils.map_wrap
+def run_umi_transform(*args):
+    return umi.umi_transform(*args)
+
+@utils.map_wrap
+def run_kallisto_singlecell(*args):
+    return kallisto.run_kallisto_singlecell(*args)
+
+@utils.map_wrap
+def run_salmon_reads(*args):
+    return salmon.run_salmon_reads(*args)
+
+@utils.map_wrap
+def run_salmon_bam(*args):
+    return salmon.run_salmon_bam(*args)
+
+@utils.map_wrap
 def run_sailfish(*args):
     return sailfish.run_sailfish(*args)
+
+@utils.map_wrap
+def run_rapmap_align(*args):
+    return rapmap.run_rapmap_align(*args)
 
 @utils.map_wrap
 def prepare_sample(*args):
@@ -46,8 +80,8 @@ def prep_samples(*args):
     return sample.prep_samples(*args)
 
 @utils.map_wrap
-def seqbuster(*args):
-    return srna.mirbase(*args)
+def srna_annotation(*args):
+    return srna.sample_annotation(*args)
 
 @utils.map_wrap
 def seqcluster_prepare(*args):
@@ -62,6 +96,10 @@ def srna_alignment(*args):
     return seqcluster.run_align(*args)
 
 @utils.map_wrap
+def peakcalling(*args):
+    return peaks.calling(*args)
+
+@utils.map_wrap
 def prep_align_inputs(*args):
     return alignprep.create_inputs(*args)
 
@@ -72,6 +110,10 @@ def merge_sample(*args):
 @utils.map_wrap
 def delayed_bam_merge(*args):
     return sample.delayed_bam_merge(*args)
+
+@utils.map_wrap
+def merge_split_alignments(*args):
+    return sample.merge_split_alignments(*args)
 
 @utils.map_wrap
 def piped_bamprep(*args):
@@ -94,12 +136,12 @@ def pipeline_summary(*args):
     return qcsummary.pipeline_summary(*args)
 
 @utils.map_wrap
-def coverage_report(*args):
-    return qcsummary.coverage_report(*args)
+def qsignature_summary(*args):
+    return qsignature.summary(*args)
 
 @utils.map_wrap
-def qsignature_summary(*args):
-    return qcsummary.qsignature_summary(*args)
+def multiqc_summary(*args):
+    return multiqc.summary(*args)
 
 @utils.map_wrap
 def generate_transcript_counts(*args):
@@ -132,6 +174,26 @@ def run_rnaseq_joint_genotyping(*args):
 @utils.map_wrap
 def combine_bam(*args):
     return shared.combine_bam(*args)
+
+@utils.map_wrap
+def batch_for_variantcall(*args):
+    return genotype.batch_for_variantcall(*args)
+
+@utils.map_wrap
+def vc_output_record(*args):
+    return genotype.vc_output_record(*args)
+
+@utils.map_wrap
+def variantcall_batch_region(*args):
+    return genotype.variantcall_batch_region(*args)
+
+@utils.map_wrap
+def concat_batch_variantcalls(*args):
+    return genotype.concat_batch_variantcalls(*args)
+
+@utils.map_wrap
+def get_parallel_regions(*args):
+    return region.get_parallel_regions(*args)
 
 @utils.map_wrap
 def variantcall_sample(*args):
@@ -194,6 +256,10 @@ def compare_to_rm(*args):
     return validate.compare_to_rm(*args)
 
 @utils.map_wrap
+def summarize_grading_vc(*args):
+    return validate.summarize_grading(*args)
+
+@utils.map_wrap
 def run_disambiguate(*args):
     return disambiguate.run(*args)
 
@@ -224,6 +290,10 @@ def cufflinks_assemble(*args):
 @utils.map_wrap
 def cufflinks_merge(*args):
     return rnaseq.cufflinks_merge(*args)
+
+@utils.map_wrap
+def stringtie_merge(*args):
+    return rnaseq.stringtie_merge(*args)
 
 @utils.map_wrap
 def organize_samples(*args):

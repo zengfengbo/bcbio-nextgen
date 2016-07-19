@@ -5,6 +5,7 @@ from itertools import izip, product
 import os
 import random
 import gzip
+import sys
 
 from Bio import SeqIO
 from bcbio.distributed import objectstore
@@ -125,6 +126,17 @@ def combine_pairs(input_files):
             if len(a) != len(b):
                 continue
             s = dif(a,b)
+            # no differences, then its the same file stem
+            if len(s) == 0:
+                logger.error("%s and %s have the same stem, so we don't know "
+                             "how to assign it to the sample data in the CSV. To "
+                             "get around this you can rename one of the files. "
+                             "If they are meant to be the same sample run in two "
+                             "lanes, combine them first with the "
+                             "bcbio_prepare_samples.py script."
+                             "(http://bcbio-nextgen.readthedocs.io/en/latest/contents/configuration.html#multiple-files-per-sample)"
+                             % (in_file, comp_file))
+                sys.exit(1)
             if len(s) > 1:
                 continue #there is only 1 difference
             if (a[s[0]] in PAIR_FILE_IDENTIFIERS and
@@ -179,7 +191,7 @@ def downsample(f1, f2, data, N, quick=False):
     else:
         records = sum(1 for _ in open(f1)) / 4
         N = records if N > records else N
-        rand_records = random.sample(xrange(records), N)
+        rand_records = sorted(random.sample(xrange(records), N))
 
     fh1 = open_possible_gzip(f1)
     fh2 = open_possible_gzip(f2) if f2 else None

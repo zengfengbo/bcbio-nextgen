@@ -27,8 +27,9 @@ def split(*items):
     for data in [x[0] for x in items]:
         dis_orgs = data["config"]["algorithm"].get("disambiguate")
         if dis_orgs:
-            data["disambiguate"] = {"genome_build": data["genome_build"],
-                                    "base": True}
+            if not data.get("disambiguate", None):
+                data["disambiguate"] = {"genome_build": data["genome_build"],
+                                        "base": True}
             out.append([data])
             # handle the instance where a single organism is disambiguated
             if isinstance(dis_orgs, basestring):
@@ -50,7 +51,7 @@ def resolve(items, run_parallel):
     to_process = collections.defaultdict(list)
     for data in [x[0] for x in items]:
         if "disambiguate" in data:
-            split_part = tuple(data["align_split"]) if data.get("combine") else None
+            split_part = tuple([int(x) for x in data["align_split"].split("-")]) if data.get("combine") else None
             to_process[(dd.get_sample_name(data), split_part)].append(data)
         else:
             out.append([data])
@@ -115,7 +116,7 @@ def run(items, config):
     # check aligner, handling tophat/tophat2 distinctions
     aligner = config["algorithm"].get("aligner")
     aligner = "tophat" if aligner.startswith("tophat") else aligner
-    assert aligner in ["bwa", "tophat", "star"], "Disambiguation only supported for bwa, star and tophat alignments."
+    assert aligner in ["bwa", "hisat2", "tophat", "star"], "Disambiguation only supported for bwa, hisat2, star and tophat alignments."
     if items[0]["disambiguate"].get("base"):
         data_a, data_b = items
     else:
@@ -126,7 +127,7 @@ def run(items, config):
         base_dir = utils.safe_makedir(os.path.normpath(os.path.join(os.path.dirname(work_bam_a),
                                                                     os.pardir, os.pardir,
                                                                     "disambiguate_%s" % aligner)))
-        out_dir = os.path.join(base_dir, "_".join([str(x) for x in data_a["align_split"]]))
+        out_dir = os.path.join(base_dir, "_".join([str(x) for x in data_a["align_split"].split("-")]))
     else:
         out_dir = os.path.normpath(os.path.join(os.path.dirname(work_bam_a),
                                                 os.pardir, "disambiguate_%s" % aligner))
@@ -154,7 +155,7 @@ def run_cplusplus(items, config):
     # check aligner, handling tophat/tophat2 distinctions
     aligner = config["algorithm"].get("aligner")
     aligner = "tophat" if aligner.startswith("tophat") else aligner
-    assert aligner in ["bwa", "tophat", "star"], "Disambiguation only supported for bwa, star and tophat alignments."
+    assert aligner in ["bwa", "hisat2", "tophat", "star"], "Disambiguation only supported for bwa, hisat2, star and tophat alignments."
     if items[0]["disambiguate"].get("base"):
         data_a, data_b = items
     else:

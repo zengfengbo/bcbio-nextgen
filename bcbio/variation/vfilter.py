@@ -7,12 +7,12 @@ import shutil
 
 import numpy
 import toolz as tz
-import vcf
 import yaml
 
 from bcbio import broad, utils
 from bcbio.distributed.transaction import file_transaction
 from bcbio.pipeline import config_utils
+from bcbio.pipeline import datadict as dd
 from bcbio.provenance import do, programs
 from bcbio.variation import vcfutils
 
@@ -29,10 +29,11 @@ def hard_w_expression(vcf_file, expression, data, name="+", filterext="",
             if vcfutils.vcf_has_variants(vcf_file):
                 bcftools = config_utils.get_program("bcftools", data["config"])
                 bgzip_cmd = "| bgzip -c" if out_file.endswith(".gz") else ""
-                variant_regions = (utils.get_in(data, ("config", "algorithm", "variant_regions"))
-                                   if limit_regions == "variant_regions" else None)
-                intervals = ("-T %s" % vcfutils.bgzip_and_index(variant_regions, data["config"])
-                             if variant_regions else "")
+                intervals = ""
+                if limit_regions == "variant_regions":
+                    variant_regions = dd.get_variant_regions(data)
+                    if variant_regions:
+                        intervals = "-T %s" % vcfutils.bgzip_and_index(variant_regions, data["config"])
                 cmd = ("{bcftools} filter -O v {intervals} --soft-filter '{name}' "
                        "-e '{expression}' -m '+' {vcf_file} {extra_cmd} {bgzip_cmd} > {tx_out_file}")
                 do.run(cmd.format(**locals()), "Hard filtering %s with %s" % (vcf_file, expression), data)
@@ -58,8 +59,7 @@ def genotype_filter(vcf_file, expression, data, name, filterext=""):
                       "--genotypeFilterName", name,
                       "--genotypeFilterExpression", "'%s'" % expression]
             jvm_opts = broad.get_gatk_framework_opts(data["config"])
-            cmd = [config_utils.get_program("gatk-framework", data["config"])] + jvm_opts + params
-            do.run(cmd, "Filter with expression: %s" % expression)
+            do.run(broad.gatk_cmd("gatk-framework", jvm_opts, params), "Filter with expression: %s" % expression)
     if out_file.endswith(".vcf.gz"):
         out_file = vcfutils.bgzip_and_index(out_file, data["config"])
     return out_file
@@ -109,13 +109,11 @@ def _freebayes_custom(in_file, ref_file, data):
     out_file = "%s-filter%s" % os.path.splitext(in_file)
     if not utils.file_exists(out_file):
         tmp_dir = utils.safe_makedir(os.path.join(os.path.dirname(in_file), "tmp"))
-        bv_jar = config_utils.get_jar("bcbio.variation",
-                                      config_utils.get_program("bcbio_variation", config, "dir"))
         resources = config_utils.get_resources("bcbio_variation", config)
         jvm_opts = resources.get("jvm_opts", ["-Xms750m", "-Xmx2g"])
         java_args = ["-Djava.io.tmpdir=%s" % tmp_dir]
-        cmd = ["java"] + jvm_opts + java_args + ["-jar", bv_jar, "variant-filter", "freebayes",
-                                                 in_file, ref_file]
+        cmd = ["bcbio-variation"] + jvm_opts + java_args + \
+              ["variant-filter", "freebayes", in_file, ref_file]
         do.run(cmd, "Custom FreeBayes filtering using bcbio.variation")
     return out_file
 
@@ -143,12 +141,12 @@ def _freebayes_hard(in_file, data):
             out_file = vcfutils.bgzip_and_index(out_file, data["config"])
         return out_file
 
+    depth_thresh, qual_thresh = None, None
     if _do_high_depth_filter(data):
         stats = _calc_vcf_stats(in_file)
-        depth_thresh = int(math.ceil(stats["avg_depth"] + 3 * math.pow(stats["avg_depth"], 0.5)))
-        qual_thresh = depth_thresh * 2.0  # Multiplier from default GATK QD hard filter
-    else:
-        depth_thresh = None
+        if stats["avg_depth"] > 0:
+            depth_thresh = int(math.ceil(stats["avg_depth"] + 3 * math.pow(stats["avg_depth"], 0.5)))
+            qual_thresh = depth_thresh * 2.0  # Multiplier from default GATK QD hard filter
     filters = ('(AF[0] <= 0.5 && (DP < 4 || (DP < 13 && %QUAL < 10))) || '
                '(AF[0] > 0.5 && (DP < 4 && %QUAL < 50))')
     if depth_thresh:
@@ -179,25 +177,32 @@ def _calc_vcf_stats(in_file):
 def _average_called_depth(in_file):
     """Retrieve the average depth of called reads in the provided VCF.
     """
+    import cyvcf2
     depths = []
-    with utils.open_gzipsafe(in_file) as in_handle:
-        reader = vcf.Reader(in_handle, in_file)
-        for rec in reader:
-            d = rec.INFO.get("DP")
-            if d is not None:
-                depths.append(d)
-    return int(math.ceil(numpy.mean(depths)))
+    for rec in cyvcf2.VCF(str(in_file)):
+        d = rec.INFO.get("DP")
+        if d is not None:
+            depths.append(int(d))
+    if len(depths) > 0:
+        return int(math.ceil(numpy.mean(depths)))
+    else:
+        return 0
 
 def platypus(in_file, data):
     """Filter Platypus calls, removing Q20 hard filter and replacing with depth and quality based filter.
 
     Platypus uses its own VCF nomenclature: TC == DP, FR == AF
+
+    Platypus gVCF output appears to have an 0/1 index problem so the reference block
+    regions are 1 base outside regions of interest. We avoid limiting regions during
+    filtering when using it.
     """
     filters = ('(FR[0] <= 0.5 && TC < 4 && %QUAL < 20) || '
                '(TC < 13 && %QUAL < 10) || '
                '(FR[0] > 0.5 && TC < 4 && %QUAL < 50)')
+    limit_regions = "variant_regions" if "gvcf" not in dd.get_tools_on(data) else None
     return hard_w_expression(in_file, filters, data, name="PlatQualDepth",
-                             extra_cmd="| sed 's/\\tQ20\\t/\\tPASS\\t/'")
+                             extra_cmd="| sed 's/\\tQ20\\t/\\tPASS\\t/'", limit_regions=limit_regions)
 
 def samtools(in_file, data):
     """Filter samtools calls based on depth and quality, using similar approaches to FreeBayes.
@@ -213,18 +218,24 @@ def gatk_snp_hard(in_file, data):
     We have a more lenient mapping quality (MQ) filter compared to GATK defaults.
     The recommended filter (MQ < 40) is too stringent, so we adjust to 30: 
     http://imgur.com/a/oHRVB
+
+    QD and FS are not calculated when generating gVCF output:
+    https://github.com/broadgsa/gatk-protected/blob/e91472ddc7d58ace52db0cab4d70a072a918d64c/protected/gatk-tools-protected/src/main/java/org/broadinstitute/gatk/tools/walkers/haplotypecaller/HaplotypeCaller.java#L300
     """
-    filters = ["QD < 2.0", "MQ < 30.0", "FS > 60.0",
-               "MQRankSum < -12.5", "ReadPosRankSum < -8.0"]
+    filters = ["MQ < 30.0", "MQRankSum < -12.5", "ReadPosRankSum < -8.0"]
+    if "gvcf" not in dd.get_tools_on(data):
+        filters += ["QD < 2.0", "FS > 60.0"]
     # GATK Haplotype caller (v2.2) appears to have much larger HaplotypeScores
     # resulting in excessive filtering, so avoid this metric
     variantcaller = utils.get_in(data, ("config", "algorithm", "variantcaller"), "gatk")
     if variantcaller not in ["gatk-haplotype"]:
         filters.append("HaplotypeScore > 13.0")
-    return hard_w_expression(in_file, " || ".join(filters), data, "GATKHardSNP", "SNP")
+    return hard_w_expression(in_file, 'TYPE="snp" && (%s)' % " || ".join(filters), data, "GATKHardSNP", "SNP")
 
 def gatk_indel_hard(in_file, data):
     """Perform hard filtering on GATK indels using best-practice recommendations.
     """
-    filters = ["QD < 2.0", "ReadPosRankSum < -20.0", "FS > 200.0"]
-    return hard_w_expression(in_file, " || ".join(filters), data, "GATKHardIndel", "INDEL")
+    filters = ["ReadPosRankSum < -20.0"]
+    if "gvcf" not in dd.get_tools_on(data):
+        filters += ["QD < 2.0", "FS > 200.0"]
+    return hard_w_expression(in_file, 'TYPE="indel" && (%s)' % " || ".join(filters), data, "GATKHardIndel", "INDEL")

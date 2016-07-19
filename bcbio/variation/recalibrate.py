@@ -13,6 +13,7 @@ from bcbio import bam, broad
 from bcbio.log import logger
 from bcbio.utils import file_exists
 from bcbio.distributed.transaction import file_transaction, tx_tmpdir
+from bcbio.pipeline import datadict as dd
 from bcbio.variation.realign import has_aligned_reads
 
 # ## GATK recalibration
@@ -20,16 +21,16 @@ from bcbio.variation.realign import has_aligned_reads
 def prep_recal(data):
     """Perform a GATK recalibration of the sorted aligned BAM, producing recalibrated BAM.
     """
-    if data["config"]["algorithm"].get("recalibrate", True) in [True, "gatk"]:
-        logger.info("Recalibrating %s with GATK" % str(data["name"]))
+    if dd.get_recalibrate(data) in [True, "gatk"]:
+        logger.info("Recalibrating %s with GATK" % str(dd.get_sample_name(data)))
         ref_file = data["sam_ref"]
         config = data["config"]
         dbsnp_file = tz.get_in(("genome_resources", "variation", "dbsnp"), data)
         if not dbsnp_file:
             logger.info("Skipping GATK BaseRecalibrator because no VCF file of known variants was found.")
             return [[data]]
-        broad_runner = broad.runner_from_config(config)
         platform = config["algorithm"].get("platform", "illumina")
+        broad_runner = broad.runner_from_path("picard", config)
         broad_runner.run_fn("picard_index_ref", ref_file)
         if config["algorithm"].get("mark_duplicates", True):
             (dup_align_bam, _) = broad_runner.run_fn("picard_mark_duplicates", data["work_bam"])
@@ -38,6 +39,7 @@ def prep_recal(data):
         bam.index(dup_align_bam, config)
         intervals = config["algorithm"].get("variant_regions", None)
         data["work_bam"] = dup_align_bam
+        broad_runner = broad.runner_from_config(config)
         data["prep_recal"] = _gatk_base_recalibrator(broad_runner, dup_align_bam, ref_file,
                                                      platform, dbsnp_file, intervals, data)
     return [[data]]

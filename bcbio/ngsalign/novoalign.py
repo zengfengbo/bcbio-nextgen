@@ -54,13 +54,14 @@ def align_pipe(fastq_file, pair_file, ref_file, names, align_dir, data):
     """Perform piped alignment of fastq input files, generating sorted output BAM.
     """
     pair_file = pair_file if pair_file else ""
+    # back compatible -- older files were named with lane information, use sample name now
     out_file = os.path.join(align_dir, "{0}-sort.bam".format(names["lane"]))
-    if data.get("align_split"):
+    if not utils.file_exists(out_file):
+        out_file = os.path.join(align_dir, "{0}-sort.bam".format(dd.get_sample_name(data)))
+    if data.get("align_split") or fastq_file.endswith(".sdf"):
         final_file = out_file
         out_file, data = alignprep.setup_combine(final_file, data)
-        fastq_file = alignprep.split_namedpipe_cl(fastq_file, data)
-        if pair_file:
-            pair_file = alignprep.split_namedpipe_cl(pair_file, data)
+        fastq_file, pair_file = alignprep.split_namedpipe_cls(fastq_file, pair_file, data)
     else:
         final_file = None
     samtools = config_utils.get_program("samtools", data["config"])

@@ -12,6 +12,7 @@ import shutil
 import vcf
 
 from bcbio import utils
+from bcbio.bam import ref
 from bcbio.distributed.transaction import file_transaction, tx_tmpdir
 from bcbio.pipeline import datadict as dd
 from bcbio.provenance import do
@@ -34,7 +35,7 @@ def _run_lumpy(full_bams, sr_bams, disc_bams, work_dir, items):
                 full_bams = ",".join(full_bams)
                 sr_bams = ",".join(sr_bams)
                 disc_bams = ",".join(disc_bams)
-                exclude = "-x %s" % sv_exclude_bed if utils.file_exists(sv_exclude_bed) else ""
+                exclude = "-x %s" % sv_exclude_bed if (sv_exclude_bed and utils.file_exists(sv_exclude_bed)) else ""
                 ref_file = dd.get_ref_file(items[0])
                 # use our bcbio python for runs within lumpyexpress
                 curpython_dir = os.path.dirname(sys.executable)
@@ -52,7 +53,9 @@ def _filter_by_support(in_file, data):
       - Large calls need split read evidence.
     """
     rc_filter = ("FORMAT/SU < 4 || "
-                 "(FORMAT/SR == 0 && ABS(SVLEN)>50000)")
+                 "(FORMAT/SR == 0 && FORMAT/SU < 15 && ABS(SVLEN)>50000) || "
+                 "(FORMAT/SR == 0 && FORMAT/SU < 5 && ABS(SVLEN)<2000) || "
+                 "(FORMAT/SR == 0 && FORMAT/SU < 15 && ABS(SVLEN)<300)")
     return vfilter.hard_w_expression(in_file, rc_filter, data, name="ReadCountSupport",
                                      limit_regions=None)
 
@@ -127,11 +130,15 @@ def run(items):
         sample_vcf = vcfutils.select_sample(lumpy_vcf, sample,
                                             utils.append_stem(lumpy_vcf, "-%s" % sample),
                                             data["config"])
-        std_vcf, bnd_vcf = _split_breakends(sample_vcf, data)
-        std_gt_vcf = _run_svtyper(std_vcf, dedup_bam, sr_bam, exclude_file, data)
-        gt_vcf = vcfutils.combine_variant_files(orig_files=[std_gt_vcf, bnd_vcf],
-                                                out_file="%s-combined.vcf.gz" % utils.splitext_plus(std_gt_vcf)[0],
-                                                ref_file=dd.get_ref_file(data), config=data["config"])
+        if "bnd-genotype" in dd.get_tools_on(data):
+            gt_vcf = _run_svtyper(sample_vcf, dedup_bam, sr_bam, exclude_file, data)
+        else:
+            std_vcf, bnd_vcf = _split_breakends(sample_vcf, data)
+            std_gt_vcf = _run_svtyper(std_vcf, dedup_bam, sr_bam, exclude_file, data)
+            gt_vcf = vcfutils.concat_variant_files_bcftools(
+                orig_files=[std_gt_vcf, bnd_vcf],
+                out_file="%s-combined.vcf.gz" % utils.splitext_plus(std_gt_vcf)[0],
+                config=data["config"])
         gt_vcfs[dd.get_sample_name(data)] = _filter_by_support(gt_vcf, data)
     if paired and paired.normal_name:
         gt_vcfs = _filter_by_background([paired.tumor_name], [paired.normal_name], gt_vcfs, paired.tumor_data)
@@ -140,7 +147,10 @@ def run(items):
         if "sv" not in data:
             data["sv"] = []
         vcf_file = gt_vcfs[dd.get_sample_name(data)]
-        effects_vcf, _ = effects.add_to_vcf(vcf_file, data, "snpeff")
+        if dd.get_svprioritize(data):
+            effects_vcf, _ = effects.add_to_vcf(vcf_file, data, "snpeff")
+        else:
+            effects_vcf = None
         data["sv"].append({"variantcaller": "lumpy",
                            "vrn_file": effects_vcf or vcf_file,
                            "exclude_file": exclude_file})
@@ -164,6 +174,14 @@ def _split_breakends(in_file, data):
     vcfutils.bgzip_and_index(std_file, data["config"])
     return std_file, bnd_file
 
+def run_svtyper_prioritize(call):
+    """Run svtyper on prioritized outputs, adding in typing for breakends skipped earlier.
+    """
+    def _run(in_file, work_dir, data):
+        dedup_bam, sr_bam, _ = sshared.get_split_discordants(data, work_dir)
+        return _run_svtyper(in_file, dedup_bam, sr_bam, call.get("exclude_file"), data)
+    return _run
+
 def _run_svtyper(in_file, full_bam, sr_bam, exclude_file, data):
     """Genotype structural variant calls with SVtyper.
 
@@ -182,8 +200,20 @@ def _run_svtyper(in_file, full_bam, sr_bam, exclude_file, data):
                     regions_to_rm = "-T ^%s" % (exclude_file)
                 else:
                     regions_to_rm = ""
+                # add FILTER headers, which are lost during svtyping
+                header_file = "%s-header.txt" % utils.splitext_plus(tx_out_file)[0]
+                with open(header_file, "w") as out_handle:
+                    with utils.open_gzipsafe(in_file) as in_handle:
+                        for line in in_handle:
+                            if not line.startswith("#"):
+                                break
+                            if line.startswith("##FILTER"):
+                                out_handle.write(line)
+                    for region in ref.file_contigs(dd.get_ref_file(data), data["config"]):
+                        out_handle.write("##contig=<ID=%s,length=%s>\n" % (region.name, region.size))
                 cmd = ("bcftools view {in_file} {regions_to_rm} | "
                        "{python} {svtyper} -M -B {full_bam} -S {sr_bam} | "
+                       "bcftools annotate -h {header_file} | "
                        "bgzip -c > {tx_out_file}")
                 do.run(cmd.format(**locals()), "SV genotyping with svtyper")
     return vcfutils.sort_by_ref(out_file, data)

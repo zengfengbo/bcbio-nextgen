@@ -3,8 +3,11 @@
 Samples may include multiple lanes, or barcoded subsections of lanes,
 processed together.
 """
+import collections
 import copy
+import glob
 import os
+import re
 
 import toolz as tz
 
@@ -12,7 +15,8 @@ from bcbio import utils, bam, broad
 from bcbio.log import logger
 from bcbio.distributed import objectstore
 from bcbio.pipeline.merge import merge_bam_files
-from bcbio.bam import fastq, callable, highdepth, trim
+from bcbio.bam import callable, highdepth, trim
+from bcbio.hla import optitype
 from bcbio.ngsalign import postalign
 from bcbio.pipeline.fastq import get_fastq_files
 from bcbio.pipeline.alignment import align_to_sort_bam
@@ -80,9 +84,24 @@ def _add_supplemental_bams(data):
                 data[sup_key][supext] = test_file
     return data
 
+def _add_hla_files(data):
+    """Add extracted fastq files of HLA alleles for typing.
+    """
+    if "hla" not in data:
+        data["hla"] = {}
+    align_file = dd.get_align_bam(data)
+    hla_dir = os.path.join(os.path.dirname(align_file), "hla")
+    if not os.path.exists(hla_dir):
+        hla_files = None
+    else:
+        hla_files = sorted(list(glob.glob(os.path.join(hla_dir, "%s.*.fq" % os.path.basename(align_file)))))
+    data["hla"]["fastq"] = hla_files
+    return data
+
 def process_alignment(data, alt_input=None):
     """Do an alignment of fastq files, preparing a sorted BAM output file.
     """
+    data = utils.to_single_data(data)
     fastq1, fastq2 = dd.get_input_sequence_files(data)
     if alt_input:
         fastq1, fastq2 = alt_input
@@ -92,17 +111,19 @@ def process_alignment(data, alt_input=None):
         logger.info("Aligning lane %s with %s aligner" % (data["rgnames"]["lane"], aligner))
         data = align_to_sort_bam(fastq1, fastq2, aligner, data)
         data = _add_supplemental_bams(data)
-    elif fastq1 and os.path.exists(fastq1) and fastq1.endswith(".bam"):
+    elif fastq1 and objectstore.file_exists_or_remote(fastq1) and fastq1.endswith(".bam"):
         sort_method = config["algorithm"].get("bam_sort")
         bamclean = config["algorithm"].get("bam_clean")
         if bamclean is True or bamclean == "picard":
             if sort_method and sort_method != "coordinate":
                 raise ValueError("Cannot specify `bam_clean: picard` with `bam_sort` other than coordinate: %s"
                                  % sort_method)
-            out_bam = cleanbam.picard_prep(fastq1, data["rgnames"], data["sam_ref"], data["dirs"],
+            out_bam = cleanbam.picard_prep(fastq1, data["rgnames"], dd.get_ref_file(data), data["dirs"],
                                            data)
+        elif bamclean == "fixrg":
+            out_bam = cleanbam.fixrg(fastq1, data["rgnames"], dd.get_ref_file(data), data["dirs"], data)
         elif sort_method:
-            runner = broad.runner_from_config(config)
+            runner = broad.runner_from_path("picard", config)
             out_file = os.path.join(data["dirs"]["work"], "{}-sort.bam".format(
                 os.path.splitext(os.path.basename(fastq1))[0]))
             out_bam = runner.run_fn("picard_sort", fastq1, sort_method, out_file)
@@ -110,7 +131,7 @@ def process_alignment(data, alt_input=None):
             out_bam = link_bam_file(fastq1, os.path.join(data["dirs"]["work"], "prealign",
                                                          data["rgnames"]["sample"]))
         bam.index(out_bam, data["config"])
-        bam.check_header(out_bam, data["rgnames"], data["sam_ref"], data["config"])
+        bam.check_header(out_bam, data["rgnames"], dd.get_ref_file(data), data["config"])
         dedup_bam = postalign.dedup_bam(out_bam, data)
         bam.index(dedup_bam, data["config"])
         data["work_bam"] = dedup_bam
@@ -124,9 +145,13 @@ def process_alignment(data, alt_input=None):
     else:
         raise ValueError("Could not process input file from sample configuration. \n" +
                          fastq1 +
-                         "\nIs the path to the file correct?\n" +
+                         "\nIs the path to the file correct or is empty?\n" +
                          "If it is a fastq file (not pre-aligned BAM or CRAM), "
                          "is an aligner specified in the input configuration?")
+    if data.get("work_bam"):
+        # Add stable 'align_bam' target to use for retrieving raw alignment
+        data["align_bam"] = data["work_bam"]
+        data = _add_hla_files(data)
     return [[data]]
 
 def prep_samples(*items):
@@ -138,7 +163,7 @@ def prep_samples(*items):
     Cleans input BED files to avoid issues with overlapping input segments.
     """
     out = []
-    for data in (x[0] for x in items):
+    for data in (utils.to_single_data(x) for x in items):
         data = bedutils.clean_inputs(data)
         out.append([data])
     return out
@@ -147,18 +172,26 @@ def postprocess_alignment(data):
     """Perform post-processing steps required on full BAM files.
     Prepares list of callable genome regions allowing subsequent parallelization.
     """
-    if vmulti.bam_needs_processing(data) and data["work_bam"].endswith(".bam"):
+    data = utils.to_single_data(data)
+    bam_file = data.get("align_bam") or data.get("work_bam")
+    if vmulti.bam_needs_processing(data) and bam_file and bam_file.endswith(".bam"):
         ref_file = dd.get_ref_file(data)
+        out_dir = utils.safe_makedir(os.path.join(dd.get_work_dir(data), "align",
+                                                  dd.get_sample_name(data)))
+        bam_file_ready = os.path.join(out_dir, os.path.basename(bam_file))
+        if not utils.file_exists(bam_file_ready):
+            utils.symlink_plus(bam_file, bam_file_ready)
+        bam.index(bam_file_ready, data["config"])
         callable_region_bed, nblock_bed, callable_bed = \
-            callable.block_regions(data["work_bam"], ref_file, data)
-        highdepth_bed = highdepth.identify(data)
-        bam.index(data["work_bam"], data["config"])
-        sample_callable = callable.sample_callable_bed(data["work_bam"], ref_file, data)
-        offtarget_stats = callable.calculate_offtarget(data["work_bam"], ref_file, data)
-        data["regions"] = {"nblock": nblock_bed, "callable": callable_bed, "highdepth": highdepth_bed,
+            callable.block_regions(bam_file_ready, ref_file, data)
+        sample_callable = callable.sample_callable_bed(bam_file_ready, ref_file, data)
+        offtarget_stats = callable.calculate_offtarget(bam_file_ready, ref_file, data)
+        data["regions"] = {"nblock": nblock_bed, "callable": callable_bed,
                            "sample_callable": sample_callable,
                            "offtarget_stats": offtarget_stats}
         data = coverage.assign_interval(data)
+        highdepth_bed = highdepth.identify(data)
+        data["regions"]["highdepth"] = highdepth_bed
         if (os.path.exists(callable_region_bed) and
                 not data["config"]["algorithm"].get("variant_regions")):
             data["config"]["algorithm"]["variant_regions"] = callable_region_bed
@@ -234,10 +267,62 @@ def delayed_bam_merge(data):
         data.pop("combine", None)
     return [[data]]
 
+def merge_split_alignments(data):
+    """Merge split BAM inputs generated by common workflow language runs.
+    """
+    data = utils.to_single_data(data)
+    data = _merge_align_bams(data)
+    data = _merge_hla_fastq_inputs(data)
+    return [[data]]
+
+def _merge_align_bams(data):
+    """Merge multiple alignment BAMs, including split and discordant reads.
+    """
+    for key in (["work_bam"], ["work_bam-plus", "disc"], ["work_bam-plus", "sr"]):
+        in_files = tz.get_in(key, data)
+        if in_files:
+            if not isinstance(in_files, (list, tuple)):
+                in_files = [in_files]
+            ext = "-%s" % key[-1] if len(key) > 1 else ""
+            out_file = os.path.join(dd.get_work_dir(data), "align", dd.get_sample_name(data),
+                                    "%s-sort%s.bam" % (dd.get_sample_name(data), ext))
+            merged_file = merge_bam_files(in_files, utils.safe_makedir(os.path.dirname(out_file)),
+                                          data["config"], out_file=out_file)
+            data = tz.update_in(data, key, lambda x: merged_file)
+    if "align_bam" in data and "work_bam" in data:
+        data["align_bam"] = data["work_bam"]
+    return data
+
+def _merge_hla_fastq_inputs(data):
+    """Merge HLA inputs from a split initial alignment.
+    """
+    hla_key = ["hla", "fastq"]
+    hla_sample_files = [x for x in tz.get_in(hla_key, data, []) if x and x != "None"]
+    merged_hlas = None
+    if hla_sample_files:
+        out_files = collections.defaultdict(list)
+        for hla_files in hla_sample_files:
+            for hla_file in hla_files:
+                rehla = re.search(".hla.(?P<hlatype>[\w-]+).fq", hla_file)
+                if rehla:
+                    hlatype = rehla.group("hlatype")
+                    out_files[hlatype].append(hla_file)
+        if len(out_files) > 0:
+            hla_outdir = utils.safe_makedir(os.path.join(dd.get_work_dir(data), "align",
+                                                         dd.get_sample_name(data), "hla"))
+            merged_hlas = []
+            for hlatype, files in out_files.items():
+                out_file = os.path.join(hla_outdir, "%s-%s.fq" % (dd.get_sample_name(data), hlatype))
+                optitype.combine_hla_fqs([(hlatype, f) for f in files], out_file, data)
+                merged_hlas.append(out_file)
+    data = tz.update_in(data, hla_key, lambda x: merged_hlas)
+    return data
+
 def prepare_bcbio_samples(sample):
     """
     Function that will use specific function to merge input files
     """
+    logger.info("Preparing %s files %s to merge into %s." % (sample['name'], sample['files'], sample['out_file']))
     if sample['fn'] == "fq_merge":
         out_file = fq_merge(sample['files'], sample['out_file'], sample['config'])
     elif sample['fn'] == "bam_merge":

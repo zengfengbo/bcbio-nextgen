@@ -6,11 +6,11 @@ It is part of the explant RNA/DNA-Seq workflow where an informatics
 approach is used to distinguish between e.g. human and mouse or rat RNA/DNA reads.
 
 For reads that have aligned to both organisms, the functionality is based on
-comparing quality scores from either Tophat, STAR or BWA. Read
+comparing quality scores from either Tophat, Hisat2, STAR or BWA. Read
 name is used to collect all alignments for both mates (_1 and _2) and
 compared between the alignments from the two species.
 
-For tophat (default, can be changed using option -a), the sum of the flags XO,
+For Tophat (default, can be changed using option -a) and Hisat2, the sum of the flags XO,
 NM and NH is evaluated and the lowest sum wins the paired end reads. For equal
 scores, the reads are assigned as ambiguous.
 
@@ -55,23 +55,23 @@ def read_next_reads(fileobject, listobject):
 
 # disambiguate between two lists of reads
 def disambiguate(humanlist, mouselist, disambalgo):
-    if disambalgo == 'tophat':
+    if disambalgo in ['tophat','hisat2']:
         dv = 2**13 # a high quality score to replace missing quality scores (no real quality score should be this high)
         sa = array('i',(dv for i in range(0,4))) # score array, with [human_1_QS, human_2_QS, mouse_1_QS, mouse_2_QS]
         for read in humanlist:
-            if 0x4&read.flag: # flag 0x4 means unaligned
+            if read.is_unmapped:
                 continue
             QScore = read.opt('XO') + read.opt('NM') + read.opt('NH')
            # directionality (_1 or _2)
-            d12 = 0 if 0x40&read.flag else 1
+            d12 = 0 if read.is_read1 else 1
             if sa[d12]>QScore:
                 sa[d12]=QScore # update to lowest (i.e. 'best') quality score
         for read in mouselist:
-            if 0x4&read.flag: # flag 0x4 means unaligned
+            if read.is_unmapped:
                 continue
             QScore = read.opt('XO') + read.opt('NM') + read.opt('NH')
            # directionality (_1 or _2)
-            d12 = 2 if 0x40&read.flag else 3
+            d12 = 2 if read.is_read1 else 3
             if sa[d12]>QScore:
                 sa[d12]=QScore # update to lowest (i.e. 'best') quality score
         if min(sa[0:2])==min(sa[2:4]) and max(sa[0:2])==max(sa[2:4]): # ambiguous
@@ -91,32 +91,36 @@ def disambiguate(humanlist, mouselist, disambalgo):
             AS.append(array('i',(dv for i in range(0,4)))) # alignment score array, with [human_1_Score, human_2_Score, mouse_1_Score, mouse_2_Score]
         #
         for read in humanlist:
-            if 0x4&read.flag: # flag 0x4 means unaligned
+            if read.is_unmapped:
                 continue
             # directionality (_1 or _2)
-            d12 = 0 if 0x40&read.flag else 1
+            d12 = 0 if read.is_read1 else 1
             for x in range(0, len(bwatagsigns)):
                 try:
                     QScore = bwatagsigns[x]*read.opt(bwatags[x])
                 except KeyError:
                     if bwatags[x] == 'NM':
                         bwatags[x] = 'nM' # oddity of STAR
+                    elif bwatags[x] == 'AS':
+                        continue # this can happen for e.g. hg38 ALT-alignments (missing AS)
                     QScore = bwatagsigns[x]*read.opt(bwatags[x])
                     
                 if AS[x][d12]<QScore:
                     AS[x][d12]=QScore # update to highest (i.e. 'best') quality score
         #
         for read in mouselist:
-            if 0x4&read.flag: # flag 0x4 means unaligned
+            if read.is_unmapped:
                 continue
            # directionality (_1 or _2)
-            d12 = 2 if 0x40&read.flag else 3
+            d12 = 2 if read.is_read1 else 3
             for x in range(0, len(bwatagsigns)):
                 try:
                     QScore = bwatagsigns[x]*read.opt(bwatags[x])
                 except KeyError:
                     if bwatags[x] == 'NM':
                         bwatags[x] = 'nM' # oddity of STAR
+                    elif bwatags[x] == 'AS':
+                        continue # this can happen for e.g. hg38 ALT-alignments (missing AS)
                     QScore = bwatagsigns[x]*read.opt(bwatags[x])
                 
                 if AS[x][d12]<QScore:
@@ -147,7 +151,7 @@ def main(args):
     intermdir = args.intermediate_dir
     disablesort = args.no_sort
     disambalgo = args.aligner
-    supportedalgorithms = set(['tophat', 'bwa', 'star'])
+    supportedalgorithms = set(['tophat', 'hisat2', 'bwa', 'star'])
 
     # check existence of input BAM files
     if not (file_exists(humanfilename) and file_exists(mousefilename)):
@@ -306,7 +310,7 @@ comparing quality scores from either Tophat of BWA. Read
 name is used to collect all alignments for both mates (_1 and _2) and
 compared between human and mouse alignments.
 
-For tophat (default, can be changed using option -a), the sum of the tags XO,
+For Tophat (default, can be changed using option -a), the sum of the tags XO,
 NM and NH is evaluated and the lowest sum wins the paired end reads. For equal
 scores (both mates, both species), the reads are assigned as ambiguous.
 
@@ -341,7 +345,7 @@ disambiguate.py -s mysample1 test/human.bam test/mouse.bam
                        'BAM files. If not provided, the input BAM file prefix '
                        'will be used. Do not include .bam in the prefix.')
    parser.add_argument('-a', '--aligner', default='tophat',
-                       choices=('tophat', 'bwa', 'star'),
+                       choices=('tophat', 'hisat2', 'bwa', 'star'),
                        help='The aligner used to generate these reads. Some '
                        'aligners set different tags.')
    args = parser.parse_args()

@@ -9,6 +9,7 @@ import os
 import toolz as tz
 
 from bcbio import utils
+from bcbio.pipeline import datadict as dd
 from bcbio.variation import vcfutils
 
 # ## Group batches to process together
@@ -30,10 +31,11 @@ def group_by_batch(items, require_bam=True):
 def bam_needs_processing(data):
     """Check if a work input needs processing for parallelization.
     """
-    return (data.get("work_bam") and
-            any(tz.get_in(["config", "algorithm", x], data) for x in
-                ["variantcaller", "mark_duplicates", "recalibrate", "realign", "svcaller",
-                 "jointcaller"]))
+    return ((data.get("work_bam") or data.get("align_bam")) and
+            (any(tz.get_in(["config", "algorithm", x], data) for x in
+                 ["variantcaller", "mark_duplicates", "recalibrate", "realign", "svcaller",
+                  "jointcaller", "variant_regions"])
+             or any(k in data for k in ["cwl_keys", "output_cwl_keys"])))
 
 def get_batch_for_key(data):
     """Retrieve batch information useful as a unique key for the sample.
@@ -46,9 +48,9 @@ def get_batch_for_key(data):
 
 def _get_batches(data, require_bam=True):
     if bam_needs_processing(data) or not require_bam:
-        batches = tz.get_in(("metadata", "batch"), data, data["description"])
+        batches = dd.get_batch(data) or dd.get_sample_name(data)
     else:
-        batches = data["description"]
+        batches = dd.get_sample_name(data)
     if not isinstance(batches, (list, tuple)):
         batches = [batches]
     return batches
@@ -108,8 +110,7 @@ def _group_batches_shared(xs, caller_batch_fn, prep_data_fn):
     singles = []
     batch_groups = collections.defaultdict(list)
     for args in xs:
-        assert len(args) == 1
-        data = args[0]
+        data = utils.to_single_data(args)
         caller, batch = caller_batch_fn(data)
         region = _list_to_tuple(data["region"]) if "region" in data else ()
         if batch is not None:
@@ -243,7 +244,8 @@ def split_variants_by_sample(data):
     if "group_orig" not in data:
         return [[data]]
     # cancer tumor/normal
-    elif vcfutils.get_paired_phenotype(data):
+    elif (vcfutils.get_paired_phenotype(data)
+            and "tumor" in [vcfutils.get_paired_phenotype(d) for d in get_orig_items(data)]):
         out = []
         for i, sub_data in enumerate(get_orig_items(data)):
             if vcfutils.get_paired_phenotype(sub_data) == "tumor":
@@ -255,8 +257,9 @@ def split_variants_by_sample(data):
                 sub_data.pop("vrn_file", None)
             out.append([sub_data])
         return out
-    # joint calling, do not split back up due to potentially large sample sizes
-    elif tz.get_in(("config", "algorithm", "jointcaller"), data):
+    # joint calling or larger runs, do not split back up and keep in batches
+    elif (tz.get_in(("config", "algorithm", "jointcaller"), data)
+          or len(get_orig_items(data)) > 5):
         out = []
         for sub_data in get_orig_items(data):
             cur_batch = tz.get_in(["metadata", "batch"], data)

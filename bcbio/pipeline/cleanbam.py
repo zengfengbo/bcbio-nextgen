@@ -5,12 +5,33 @@ chromosome order, run group information and other BAM formatting.
 This provides a pipeline to prepare and resort an input.
 """
 import os
+import subprocess
 
 from bcbio import bam, broad, utils
 from bcbio.distributed.transaction import file_transaction, tx_tmpdir
+from bcbio.ngsalign import novoalign
 from bcbio.pipeline import config_utils
 from bcbio.pipeline import datadict as dd
 from bcbio.provenance import do
+
+def fixrg(in_bam, names, ref_file, dirs, data):
+    """Fix read group in a file, using samtools addreplacerg.
+
+    addreplacerg does not remove the old read group, causing confusion when
+    checking. We use reheader to work around this
+    """
+    work_dir = utils.safe_makedir(os.path.join(dirs["work"], "bamclean", dd.get_sample_name(data)))
+    out_file = os.path.join(work_dir, "%s-fixrg.bam" % utils.splitext_plus(os.path.basename(in_bam))[0])
+    if not utils.file_uptodate(out_file, in_bam):
+        with file_transaction(data, out_file) as tx_out_file:
+            rg_info = novoalign.get_rg_info(names)
+            new_header = "%s-header.txt" % os.path.splitext(out_file)[0]
+            do.run("samtools view -H {in_bam} | grep -v ^@RG > {new_header}".format(**locals()),
+                   "Create empty RG header: %s" % dd.get_sample_name(data))
+            cmd = ("samtools reheader {new_header} {in_bam} | "
+                   "samtools addreplacerg -r '{rg_info}' -m overwrite_all -O bam -o {tx_out_file} -")
+            do.run(cmd.format(**locals()), "Fix read groups: %s" % dd.get_sample_name(data))
+    return out_file
 
 def picard_prep(in_bam, names, ref_file, dirs, data):
     """Prepare input BAM using Picard and GATK cleaning tools.
@@ -20,7 +41,7 @@ def picard_prep(in_bam, names, ref_file, dirs, data):
     - PrintReads to filters to remove problem records:
     - filterMBQ to remove reads with mismatching bases and base qualities
     """
-    runner = broad.runner_from_config(data["config"], "picard")
+    runner = broad.runner_from_path("picard", data["config"])
     work_dir = utils.safe_makedir(os.path.join(dirs["work"], "bamclean", names["sample"]))
     runner.run_fn("picard_index_ref", ref_file)
     reorder_bam = os.path.join(work_dir, "%s-reorder.bam" %
@@ -47,7 +68,6 @@ def _filter_bad_reads(in_bam, ref_file, data):
                 if dd.get_quality_format(data, "").lower() == "illumina":
                     params.append("--fix_misencoded_quality_scores")
                 jvm_opts = broad.get_gatk_framework_opts(data["config"], tmp_dir)
-                cmd = [config_utils.get_program("gatk-framework", data["config"])] + jvm_opts + params
-                do.run(cmd, "Filter problem reads")
+                do.run(broad.gatk_cmd("gatk-framework", jvm_opts, params), "Filter problem reads")
     bam.index(out_file, data["config"])
     return out_file

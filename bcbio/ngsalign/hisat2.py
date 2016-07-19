@@ -25,8 +25,8 @@ def align(fastq_file, pair_file, ref_file, names, align_dir, data):
         cmd += "-U {fastq_file} "
     if dd.get_analysis(data).lower() == "smallrna-seq":
         cmd += "-k 1000 "
-    # if assembling transcripts, set flags that cufflinks can use
-    if dd.get_assemble_transcripts(data):
+    # if assembling transcripts, set flags that cufflinks/stringtie can use
+    if dd.get_transcript_assembler(data):
         cmd += "--dta-cufflinks "
     if dd.get_analysis(data).lower() == "rna-seq":
         gtf_file = dd.get_gtf_file(data)
@@ -78,6 +78,6 @@ def _get_rg_flags(names):
     return flags.format(**locals())
 
 def remap_index_fn(ref_file):
-    """Map sequence references to equivalent star indexes
+    """Map sequence references to equivalent hisat2 indexes
     """
-    return os.path.join(os.path.dirname(os.path.dirname(ref_file)), "hisat2")
+    return os.path.splitext(ref_file)[0].replace("/seq/", "/hisat2/")

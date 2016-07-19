@@ -55,7 +55,6 @@ def gtf_to_bed(gtf, alt_out_dir=None):
     create a BED file of transcript-level features with attached gene name
     or gene ids
     """
-    db = get_gtf_db(gtf)
     out_file = os.path.splitext(gtf)[0] + ".bed"
     if file_exists(out_file):
         return out_file
@@ -65,9 +64,10 @@ def gtf_to_bed(gtf, alt_out_dir=None):
         else:
             out_file = os.path.join(alt_out_dir, os.path.basename(out_file))
     with open(out_file, "w") as out_handle:
+        db = get_gtf_db(gtf)
         for feature in db.features_of_type('transcript', order_by=("seqid", "start", "end")):
             chrom = feature.chrom
-            start = feature.start
+            start = feature.start - 1
             end = feature.end
             attributes = feature.attributes.keys()
             strand = feature.strand
@@ -81,7 +81,7 @@ def gtf_to_bed(gtf, alt_out_dir=None):
 def complete_features(db):
     """
     iterator returning features which are complete (have a 'gene_id' and a
-    'transcript_id') and not
+    'transcript_id')
     """
     for feature in db.all_features():
         gene_id = feature.attributes.get('gene_id', [None])[0]
@@ -128,6 +128,7 @@ def gtf_to_fasta(gtf_file, ref_fasta, cds=False, out_file=None):
                     line = ">" + transcript + "\n"
                 if not skipping:
                     out_handle.write(line)
+    os.remove(tmp_file)
     return out_file
 
 def partition_gtf(gtf, coding=False, out_file=False):
@@ -148,7 +149,7 @@ def partition_gtf(gtf, coding=False, out_file=False):
     else:
         pred = lambda biotype: biotype and biotype != "protein_coding"
 
-    biotype_lookup = biotype_lookup_fn(gtf)
+    biotype_lookup = _biotype_lookup_fn(gtf)
 
     db = get_gtf_db(gtf)
     with file_transaction(out_file) as tx_out_file:
@@ -158,27 +159,6 @@ def partition_gtf(gtf, coding=False, out_file=False):
                 if pred(biotype):
                     out_handle.write(str(feature) + "\n")
     return out_file
-
-def biotype_lookup_fn(gtf):
-    """
-    return a function that will look up the biotype of a feature
-    this checks for either gene_biotype or biotype being set or for the source
-    column to have biotype information
-    """
-    db = get_gtf_db(gtf)
-    sources = set([feature.source for feature in db.all_features()])
-    gene_biotypes = set([feature.attributes.get("gene_biotype", [None])[0]
-                         for feature in db.all_features()])
-    biotypes = set([feature.attributes.get("biotype", [None])[0]
-                    for feature in db.all_features()])
-    if "protein_coding" in sources:
-        return lambda feature: feature.source
-    elif "protein_coding" in biotypes:
-        return lambda feature: feature.attributes.get("biotype", [None])[0]
-    elif "protein_coding" in gene_biotypes:
-        return lambda feature: feature.attributes.get("gene_biotype", [None])[0]
-    else:
-        return None
 
 def split_gtf(gtf, sample_size=None, out_dir=None):
     """
@@ -288,3 +268,85 @@ def _biotype_lookup_fn(gtf):
         return lambda feature: feature.attributes.get("gene_biotype", [None])[0]
     else:
         return None
+
+def tx2genefile(gtf, out_file=None):
+    """
+    write out a file of transcript->gene mappings.
+    use the installed tx2gene.csv if it exists, else write a new one out
+    """
+    installed_tx2gene = os.path.join(os.path.dirname(gtf), "tx2gene.csv")
+    if file_exists(installed_tx2gene):
+        return installed_tx2gene
+    if file_exists(out_file):
+        return out_file
+    with file_transaction(out_file) as tx_out_file:
+        with open(tx_out_file, "w") as out_handle:
+            for k, v in transcript_to_gene(gtf).iteritems():
+                out_handle.write(",".join([k, v]) + "\n")
+    return out_file
+
+def transcript_to_gene(gtf):
+    """
+    return a dictionary keyed by transcript_id of the associated gene_id
+    """
+    gene_lookup = {}
+    for feature in complete_features(get_gtf_db(gtf)):
+        gene_id = feature.attributes.get('gene_id', [None])[0]
+        transcript_id = feature.attributes.get('transcript_id', [None])[0]
+        gene_lookup[transcript_id] = gene_id
+    return gene_lookup
+
+def is_qualimap_compatible(gtf):
+    """
+    Qualimap needs a very specific GTF format or it fails, so skip it if
+    the GTF is not in that format
+    """
+    if not gtf:
+        return False
+    db = get_gtf_db(gtf)
+    def qualimap_compatible(feature):
+        gene_id = feature.attributes.get('gene_id', [None])[0]
+        transcript_id = feature.attributes.get('transcript_id', [None])[0]
+        exon_number = feature.attributes.get('exon_number', [None])[0]
+        gene_biotype = feature.attributes.get('gene_biotype', [None])[0]
+        return gene_id and transcript_id and exon_number and gene_biotype
+    for feature in db.all_features():
+        if qualimap_compatible(feature):
+            return True
+    return False
+
+def canonical_transcripts(gtf, out_file):
+    """
+    given a GTF file, produce a new GTF file with only the longest transcript
+    for each gene
+    function lifted from:
+    https://pythonhosted.org/gffutils/_modules/gffutils/helpers.html
+    """
+    if file_exists(out_file):
+        return out_file
+    db = get_gtf_db(gtf)
+    with file_transaction(out_file) as tx_out_file:
+        with open(tx_out_file, "w") as out_handle:
+            for gene in db.features_of_type('gene'):
+                exon_list = []
+                for ti, transcript in enumerate(db.children(gene, level=1)):
+                    cds_len = 0
+                    total_len = 0
+                    exons = list(db.children(transcript, level=1))
+                    for exon in exons:
+                        exon_length = len(exon)
+                        if exon.featuretype == 'CDS':
+                            cds_len += exon_length
+                        total_len += exon_length
+
+                    exon_list.append((cds_len, total_len, transcript, exons))
+
+                # If we have CDS, then use the longest coding transcript
+                if max(i[0] for i in exon_list) > 0:
+                    best = sorted(exon_list)[0]
+                # Otherwise, just choose the longest
+                else:
+                    best = sorted(exon_list, key=lambda x: x[1])[0]
+                for exon in db.children(best[2], level=1):
+                    out_handle.write(str(exon) + "\n")
+    return out_file

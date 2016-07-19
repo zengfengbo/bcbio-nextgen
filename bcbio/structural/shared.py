@@ -3,7 +3,6 @@
 Handles exclusion regions and preparing discordant regions.
 """
 import collections
-from contextlib import closing
 import os
 
 import numpy
@@ -16,8 +15,10 @@ from bcbio import bam, utils
 from bcbio.distributed.transaction import file_transaction, tx_tmpdir
 from bcbio.bam import callable
 from bcbio.ngsalign import postalign
+from bcbio.pipeline import datadict as dd
 from bcbio.pipeline import shared, config_utils
 from bcbio.provenance import do
+from bcbio.structural import regions
 from bcbio.variation import population
 
 # ## Case/control
@@ -75,6 +76,26 @@ def remove_exclude_regions(orig_bed, base_file, items, remove_entire_feature=Fal
     else:
         return orig_bed
 
+def get_base_cnv_regions(data, work_dir):
+    """Retrieve set of target regions for CNV analysis.
+
+    Subsets to extended transcript regions for WGS experiments to avoid
+    long runtimes.
+    """
+    cov_interval = dd.get_coverage_interval(data)
+    base_regions = regions.get_sv_bed(data)
+    # if we don't have a configured BED or regions to use for SV caling
+    if not base_regions:
+        # For genome calls, subset to regions within 10kb of genes
+        if cov_interval == "genome":
+            base_regions = regions.get_sv_bed(data, "transcripts1e4", work_dir)
+            if base_regions:
+                base_regions = remove_exclude_regions(base_regions, base_regions, [data])
+        # Finally, default to the defined variant regions
+        if not base_regions:
+            base_regions = dd.get_variant_regions(data)
+    return base_regions
+
 def prepare_exclude_file(items, base_file, chrom=None):
     """Prepare a BED file for exclusion.
 
@@ -93,7 +114,8 @@ def prepare_exclude_file(items, base_file, chrom=None):
             sv_exclude_bed = _get_sv_exclude_file(items)
             if sv_exclude_bed and len(want_bedtool) > 0:
                 want_bedtool = want_bedtool.subtract(sv_exclude_bed, nonamecheck=True).saveas()
-            want_bedtool = pybedtools.BedTool(shared.remove_highdepth_regions(want_bedtool.saveas().fn, items))
+            if any(dd.get_coverage_interval(d) == "genome" for d in items):
+                want_bedtool = pybedtools.BedTool(shared.remove_highdepth_regions(want_bedtool.saveas().fn, items))
             with file_transaction(items[0], out_file) as tx_out_file:
                 full_bedtool = callable.get_ref_bedtool(tz.get_in(["reference", "fasta", "base"], items[0]),
                                                         items[0]["config"])
@@ -181,7 +203,7 @@ def get_sv_chroms(items, exclude_file):
         if int(region.start) == 0:
             exclude_regions[region.chrom] = int(region.end)
     out = []
-    with closing(pysam.Samfile(items[0]["work_bam"], "rb")) as pysam_work_bam:
+    with pysam.Samfile(items[0]["work_bam"], "rb") as pysam_work_bam:
         for chrom, length in zip(pysam_work_bam.references, pysam_work_bam.lengths):
             exclude_length = exclude_regions.get(chrom, 0)
             if exclude_length < length:
@@ -279,7 +301,7 @@ def calc_paired_insert_stats(in_bam, nsample=1000000):
     """
     dists = []
     n = 0
-    with closing(pysam.Samfile(in_bam, "rb")) as in_pysam:
+    with pysam.Samfile(in_bam, "rb") as in_pysam:
         for read in in_pysam:
             if read.is_proper_pair and read.is_read1:
                 n += 1

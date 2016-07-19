@@ -1,9 +1,9 @@
 """Functionality to query and extract information from aligned BAM files.
 """
 import collections
-import contextlib
 import os
 import itertools
+import signal
 import subprocess
 import numpy
 
@@ -21,14 +21,23 @@ from bcbio.provenance import do
 
 def is_paired(bam_file):
     """Determine if a BAM file has paired reads.
+
+    Works around issues with head closing the samtools pipe using signal trick from:
+    http://stackoverflow.com/a/12451083/252589
     """
     bam_file = objectstore.cl_input(bam_file)
-    cmd = ("sambamba view -h {bam_file} | head -50000 | "
+    cmd = ("set -o pipefail; "
+           "sambamba view -h {bam_file} | head -50000 | "
            "sambamba view -S -F paired /dev/stdin  | head -1 | wc -l")
-    out = subprocess.check_output(cmd.format(**locals()), shell=True,
-                                  executable=do.find_bash(),
-                                  stderr=open("/dev/null", "w"))
-    return int(out) > 0
+    p = subprocess.Popen(cmd.format(**locals()), shell=True,
+                         executable=do.find_bash(),
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         preexec_fn=lambda: signal.signal(signal.SIGPIPE, signal.SIG_DFL))
+    stdout, stderr = p.communicate()
+    if p.returncode == 0 or p.returncode == 141 and stderr.strip() == "":
+        return int(stdout) > 0
+    else:
+        raise ValueError("Failed to check paired status of BAM file: %s" % str(stderr))
 
 def index(in_bam, config, check_timestamp=True):
     """Index a BAM file, skipping if index present.
@@ -87,7 +96,7 @@ def get_downsample_pct(in_bam, target_counts, data):
     """Retrieve percentage of file to downsample to get to target counts.
     """
     total = sum(x.aligned for x in idxstats(in_bam, data))
-    with contextlib.closing(pysam.Samfile(in_bam, "rb")) as work_bam:
+    with pysam.Samfile(in_bam, "rb") as work_bam:
         n_rgs = max(1, len(work_bam.header.get("RG", [])))
     rg_target = n_rgs * target_counts
     if total > rg_target:
@@ -131,21 +140,22 @@ def check_header(in_bam, rgnames, ref_file, config):
 def _check_sample(in_bam, rgnames):
     """Ensure input sample name matches expected run group names.
     """
-    with contextlib.closing(pysam.Samfile(in_bam, "rb")) as bamfile:
+    with pysam.Samfile(in_bam, "rb") as bamfile:
         rg = bamfile.header.get("RG", [{}])
     msgs = []
     warnings = []
     if len(rg) > 1:
         warnings.append("Multiple read groups found in input BAM. Expect single RG per BAM.")
-    elif len(rg) == 0:
+    if len(rg) == 0:
         msgs.append("No read groups found in input BAM. Expect single RG per BAM.")
-    elif rg[0].get("SM") != rgnames["sample"]:
+    if len(rg) > 0 and any(x.get("SM") != rgnames["sample"] for x in rg):
         msgs.append("Read group sample name (SM) does not match configuration `description`: %s vs %s"
                     % (rg[0].get("SM"), rgnames["sample"]))
     if len(msgs) > 0:
         raise ValueError("Problems with pre-aligned input BAM file: %s\n" % (in_bam)
                          + "\n".join(msgs) +
-                         "\nSetting `bam_clean: picard` in the configuration can often fix this issue.")
+                         "\nSetting `bam_clean: picard` or `bam_clean: fixrg`\n"
+                         "in the configuration can often fix this issue.")
     if warnings:
         print("*** Potential problems in input BAM compared to reference:\n%s\n" %
               "\n".join(warnings))
@@ -154,7 +164,7 @@ def _check_bam_contigs(in_bam, ref_file, config):
     """Ensure a pre-aligned BAM file matches the expected reference genome.
     """
     ref_contigs = [c.name for c in ref.file_contigs(ref_file, config)]
-    with contextlib.closing(pysam.Samfile(in_bam, "rb")) as bamfile:
+    with pysam.Samfile(in_bam, "rb") as bamfile:
         bam_contigs = [c["SN"] for c in bamfile.header["SQ"]]
     problems = []
     warnings = []
@@ -362,6 +372,9 @@ def sort(in_bam, config, order="coordinate"):
                         os.path.basename(sort_file)))
             except:
                 logger.exception("Multi-core sorting failed, reverting to single core")
+                resources = config_utils.get_resources("samtools", config)
+                mem = resources.get("memory", "2G")
+                cores = 1
                 order_flag = "-n" if order == "queryname" else ""
                 do.run(samtools_cmd.format(**locals()),
                        "Sort BAM file (single core, %s): %s to %s" %
@@ -408,7 +421,7 @@ def _get_sort_stem(in_bam, order):
 def sample_name(in_bam):
     """Get sample name from BAM file.
     """
-    with contextlib.closing(pysam.AlignmentFile(in_bam, "rb", check_sq=False)) as in_pysam:
+    with pysam.AlignmentFile(in_bam, "rb", check_sq=False) as in_pysam:
         try:
             if "RG" in in_pysam.header:
                 return in_pysam.header["RG"][0]["SM"]
@@ -424,13 +437,16 @@ def estimate_read_length(bam_file, nreads=1000):
         lengths = [len(x.seq) for x in reads]
     return int(numpy.median(lengths))
 
-def estimate_fragment_size(bam_file, nreads=1000):
+def estimate_fragment_size(bam_file, nreads=5000):
     """
     estimate median fragment size of a SAM/BAM file
     """
     with open_samfile(bam_file) as bam_handle:
         reads = tz.itertoolz.take(nreads, bam_handle)
-        lengths = [x.tlen for x in reads]
+        # it would be good to skip spliced paired reads.
+        lengths = [x.template_length for x in reads if x.template_length > 0]
+    if not lengths:
+        return 0
     return int(numpy.median(lengths))
 
 def filter_stream_cmd(bam_file, data, filter_flag):
